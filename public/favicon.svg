@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title>when7meet</title>
-  <rect width="64" height="64" rx="18" fill="#19734d" />
-  <path d="M17 17h30v7L31 47h-9l15-23H17z" fill="#ffffff" />
-  <circle cx="47" cy="47" r="3" fill="#9ee0b4" />
+  <title>when7meet 7</title>
+  <rect width="64" height="64" rx="17" fill="#19734d" />
+  <text x="32" y="47" text-anchor="middle" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="44" font-weight="800">7</text>
+  <circle cx="49" cy="49" r="3" fill="#9ee0b4" />
 </svg>

@@ -57,20 +57,10 @@
 .hero-preview {
   position: relative;
   padding: 24px 24px 20px;
-  border-top: 1px solid #c7d5ca;
-  border-bottom: 1px solid #c7d5ca;
-  background: rgba(255, 255, 255, 0.44);
-}
-
-.hero-preview::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 24px;
-  width: 64px;
-  height: 4px;
-  border-radius: 0 0 4px 4px;
-  background: #19734d;
+  border: 1px solid #d5e1d8;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 16px 36px rgba(25, 115, 77, 0.08);
 }
 
 .preview-caption,

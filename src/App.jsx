@@ -13,31 +13,9 @@ const buildBoardHours = (start, end) => {
   return hours;
 };
 
-const createDemoAvailability = (dates, start, end) => {
-  const demoParticipants = ['지현', '현우', '수빈', '민재'];
-  const hours = buildBoardHours(start, end);
-  const availability = {};
-
-  dates.forEach((date, dateIndex) => {
-    hours.forEach((hour, hourIndex) => {
-      const availableUsers = demoParticipants.filter((_, participantIndex) => {
-        const pattern = (dateIndex * 3 + hourIndex * 2 + participantIndex) % 5;
-        return pattern !== 0 && pattern !== 3;
-      });
-
-      if (availableUsers.length > 0) {
-        availability[`${date}-${hour}`] = availableUsers;
-      }
-    });
-  });
-
-  return { demoParticipants, availability };
-};
-
 const SLACK_NOTIFICATION = 'Slack';
 const CREATOR_NOTIFICATION_CHANNELS = [SLACK_NOTIFICATION];
 const NO_CREATOR_NOTIFICATION = '받지 않음';
-const isLocalTestingMode = import.meta.env.DEV && !isSupabaseConfigured;
 const MEETING_TYPES = {
   REGULAR: 'regular',
   WORK: 'work',
@@ -52,7 +30,6 @@ const WEEKDAY_OPTIONS = [
   { key: 'sun', label: '일' },
 ];
 const WEEKDAY_LABELS = WEEKDAY_OPTIONS.reduce((labels, day) => ({ ...labels, [day.key]: day.label }), {});
-const BOARD_STATE_STORAGE_PREFIX = 'when7meet:board-state:';
 const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 const GOOGLE_IDENTITY_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
 let googleIdentityScriptPromise = null;
@@ -274,24 +251,6 @@ const isGoogleCalendarSlotAvailable = (events, date, hour, boardEnd) => {
   return !events.some(event => event.start < slot.end && event.end > slot.start);
 };
 
-const readBoardState = (storageKey) => {
-  try {
-    const storedState = window.localStorage.getItem(storageKey);
-    if (!storedState) return null;
-
-    const parsedState = JSON.parse(storedState);
-    if (!parsedState || typeof parsedState !== 'object') return null;
-
-    return {
-      participants: Array.isArray(parsedState.participants) ? parsedState.participants : [],
-      availability: parsedState.availability && typeof parsedState.availability === 'object' ? parsedState.availability : {},
-      credentials: parsedState.credentials && typeof parsedState.credentials === 'object' ? parsedState.credentials : {},
-    };
-  } catch {
-    return null;
-  }
-};
-
 const AppModal = ({ open, icon: Icon = Info, title, children, actions, onClose, closeOnOverlay = true }) => {
   useEffect(() => {
     if (!open || !onClose) return undefined;
@@ -362,11 +321,8 @@ export default function App() {
   const [isJoined, setIsJoined] = useState(false);
   const [participants, setParticipants] = useState([]);
   const [availability, setAvailability] = useState({});
-  const [participantCredentials, setParticipantCredentials] = useState({});
   const [participantId, setParticipantId] = useState(null);
   const [participantAuthError, setParticipantAuthError] = useState('');
-  const [boardStorageKey, setBoardStorageKey] = useState(null);
-  const [boardDataSource, setBoardDataSource] = useState('legacy');
   const [isBoardLoading, setIsBoardLoading] = useState(false);
   const [boardLoadError, setBoardLoadError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
@@ -417,7 +373,6 @@ export default function App() {
     const resetBoardSession = () => {
       setParticipants([]);
       setAvailability({});
-      setParticipantCredentials({});
       setParticipantId(null);
       setCurrentUser('');
       setCurrentPassword('');
@@ -440,8 +395,6 @@ export default function App() {
       if (!hash.startsWith('#board?')) {
         setAppState('home');
         setBoardParams(null);
-        setBoardStorageKey(null);
-        setBoardDataSource('legacy');
         setIsBoardLoading(false);
         setBoardLoadError('');
         resetBoardSession();
@@ -452,81 +405,43 @@ export default function App() {
       const params = new URLSearchParams(query);
       const meetingId = params.get('id');
 
-      if (meetingId && !isSupabaseConfigured) {
+      if (!meetingId) {
         setAppState('board');
         setBoardParams(null);
-        setBoardStorageKey(null);
-        setBoardDataSource('supabase');
+        setIsBoardLoading(false);
+        setBoardLoadError('유효한 Supabase 모임 링크가 아닙니다. 새 모임을 만들거나 올바른 링크를 확인해주세요.');
+        resetBoardSession();
+        return;
+      }
+
+      if (!isSupabaseConfigured) {
+        setAppState('board');
+        setBoardParams(null);
         setIsBoardLoading(false);
         setBoardLoadError('이 모임 링크를 열려면 Supabase 환경변수를 먼저 설정해야 합니다.');
         resetBoardSession();
         return;
       }
 
-      if (meetingId) {
-        setAppState('board');
-        setBoardParams(null);
-        setBoardStorageKey(null);
-        setBoardDataSource('supabase');
-        setIsBoardLoading(true);
-        setBoardLoadError('');
-        resetBoardSession();
-
-        try {
-          const remoteBoard = await loadMeeting(meetingId);
-          if (!isActive || window.location.hash !== hash) return;
-
-          setBoardParams(remoteBoard.boardParams);
-          setParticipants(remoteBoard.participants);
-          setAvailability(remoteBoard.availability);
-          setParticipantCredentials({});
-          setIsBoardLoading(false);
-        } catch (error) {
-          if (!isActive || window.location.hash !== hash) return;
-          setIsBoardLoading(false);
-          setBoardLoadError(error instanceof Error ? error.message : '모임 정보를 불러오지 못했습니다.');
-        }
-        return;
-      }
-
-      const parsedExpectedParticipants = parseInt(params.get('expected') || '', 10);
-      const storageKey = `${BOARD_STATE_STORAGE_PREFIX}${window.location.pathname}:${hash}`;
-      const nextBoardParams = {
-        title: params.get('title') || '모임',
-        type: params.get('type') === MEETING_TYPES.REGULAR ? MEETING_TYPES.REGULAR : MEETING_TYPES.WORK,
-        dates: (params.get('dates') || '').split(',').filter(Boolean),
-        start: parseInt(params.get('start') || '9', 10),
-        end: parseInt(params.get('end') || '18', 10),
-        expectedParticipants: Number.isFinite(parsedExpectedParticipants) && parsedExpectedParticipants > 0 ? parsedExpectedParticipants : null,
-        notificationChannel: params.get('notify') === SLACK_NOTIFICATION ? SLACK_NOTIFICATION : NO_CREATOR_NOTIFICATION
-      };
-      const demoBoardState = params.get('demo') === '1'
-        ? (() => {
-            const demo = createDemoAvailability(nextBoardParams.dates, nextBoardParams.start, nextBoardParams.end);
-            return { participants: demo.demoParticipants, availability: demo.availability, credentials: {} };
-          })()
-        : null;
-      const savedBoardState = readBoardState(storageKey);
-      const initialBoardState = savedBoardState || demoBoardState || { participants: [], availability: {}, credentials: {} };
-
-      setBoardParams(nextBoardParams);
       setAppState('board');
-      setBoardStorageKey(storageKey);
-      setBoardDataSource('legacy');
-      setIsBoardLoading(false);
+      setBoardParams(null);
+      setIsBoardLoading(true);
       setBoardLoadError('');
-      setParticipants(initialBoardState.participants);
-      setAvailability(initialBoardState.availability);
-      setParticipantCredentials(initialBoardState.credentials);
-      setParticipantId(null);
-      setIsJoined(false);
-      setCurrentUser('');
-      setCurrentPassword('');
-      setParticipantAuthError('');
-      setSelectedResultIndex(0);
-      setShareMessage('');
-      setWaveSlots({});
-      lastSavedAvailabilityRef.current = null;
+      resetBoardSession();
+
+      try {
+        const remoteBoard = await loadMeeting(meetingId);
+        if (!isActive || window.location.hash !== hash) return;
+
+        setBoardParams(remoteBoard.boardParams);
+        setParticipants(remoteBoard.participants);
+        setAvailability(remoteBoard.availability);
+        setIsBoardLoading(false);
+      } catch (error) {
+        if (!isActive || window.location.hash !== hash) return;
+        setIsBoardLoading(false);
+        setBoardLoadError(error instanceof Error ? error.message : '모임 정보를 불러오지 못했습니다.');
+      }
     };
 
     window.addEventListener('hashchange', handleHashChange);
@@ -538,21 +453,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!boardStorageKey || appState !== 'board' || boardDataSource !== 'legacy') return;
-
-    try {
-      window.localStorage.setItem(boardStorageKey, JSON.stringify({
-        participants,
-        availability,
-        credentials: participantCredentials,
-      }));
-    } catch {
-      // Private browsing or storage limits should not block the voting flow.
-    }
-  }, [appState, availability, boardDataSource, boardStorageKey, participantCredentials, participants]);
-
-  useEffect(() => {
-    if (boardDataSource !== 'supabase' || !boardParams?.id) return undefined;
+    if (!boardParams?.id) return undefined;
     let isActive = true;
 
     const refreshBoard = async () => {
@@ -571,7 +472,7 @@ export default function App() {
       isActive = false;
       unsubscribe();
     };
-  }, [boardDataSource, boardParams?.id]);
+  }, [boardParams?.id]);
 
   // --- 공통 유틸 ---
   const formatDateKey = (date) => {
@@ -683,30 +584,12 @@ export default function App() {
       showAlert('예상 참여 인원은 1명 이상으로 입력해주세요.');
       return;
     }
-    if (!isSupabaseConfigured && !isLocalTestingMode) {
+    if (!isSupabaseConfigured) {
       showAlert('Supabase 환경변수가 설정되지 않았습니다. .env.local 또는 배포 환경변수를 먼저 설정해주세요.');
       return;
     }
 
     const safeMeetingTitle = meetingTitle.trim() || '모임';
-
-    if (!isSupabaseConfigured) {
-      const localBoardParams = new URLSearchParams({
-        title: safeMeetingTitle,
-        type: meetingType,
-        dates: selectedDates.join(','),
-        start: startHour,
-        end: endHour,
-        notify: isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION,
-      });
-
-      if (isCreatorNotificationEnabled && expectedParticipantCount) {
-        localBoardParams.set('expected', expectedParticipantCount);
-      }
-
-      window.location.hash = `board?${localBoardParams.toString()}`;
-      return;
-    }
 
     setIsCreatingMeeting(true);
     try {
@@ -749,51 +632,27 @@ export default function App() {
       return;
     }
 
-    if (boardDataSource === 'supabase') {
-      const isExistingParticipant = participants.some(participant => participant.toLowerCase() === participantName.toLowerCase());
-      setIsJoining(true);
-      setParticipantAuthError('');
-
-      try {
-        const participant = await joinRemoteMeeting({
-          meetingId: boardParams.id,
-          name: participantName,
-          password: temporaryPassword,
-        });
-
-        setParticipantId(participant.id);
-        setCurrentUser(participant.name);
-        setIsJoined(true);
-        if (!isExistingParticipant) setParticipants(prev => [...prev, participant.name]);
-        showToast(isExistingParticipant ? '기존 응답을 불러왔습니다.' : `${participant.name}님으로 참여했습니다.`);
-      } catch (error) {
-        setParticipantAuthError(error instanceof Error ? error.message : '모임 참여에 실패했습니다.');
-      } finally {
-        setIsJoining(false);
-      }
-      return;
-    }
-
-    const isExistingParticipant = participants.includes(participantName);
-    const savedPassword = participantCredentials[participantName];
-
-    if (isExistingParticipant && savedPassword && savedPassword !== temporaryPassword) {
-      setParticipantAuthError('이름 또는 임시 비밀번호가 맞지 않습니다.');
-      return;
-    }
-
-    if (!isExistingParticipant) {
-      setParticipants(prev => [...prev, participantName]);
-    }
-
-    if (!isExistingParticipant || !savedPassword) {
-      setParticipantCredentials(prev => ({ ...prev, [participantName]: temporaryPassword }));
-    }
-
-    setCurrentUser(participantName);
-    setIsJoined(true);
+    const isExistingParticipant = participants.some(participant => participant.toLowerCase() === participantName.toLowerCase());
+    setIsJoining(true);
     setParticipantAuthError('');
-    showToast(isExistingParticipant && savedPassword ? '기존 응답을 불러왔습니다.' : `${participantName}님으로 참여했습니다.`);
+
+    try {
+      const participant = await joinRemoteMeeting({
+        meetingId: boardParams.id,
+        name: participantName,
+        password: temporaryPassword,
+      });
+
+      setParticipantId(participant.id);
+      setCurrentUser(participant.name);
+      setIsJoined(true);
+      if (!isExistingParticipant) setParticipants(prev => [...prev, participant.name]);
+      showToast(isExistingParticipant ? '기존 응답을 불러왔습니다.' : `${participant.name}님으로 참여했습니다.`);
+    } catch (error) {
+      setParticipantAuthError(error instanceof Error ? error.message : '모임 참여에 실패했습니다.');
+    } finally {
+      setIsJoining(false);
+    }
   };
 
   const updateSlot = (slotKey, forceMode) => {
@@ -868,7 +727,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (boardDataSource !== 'supabase' || !isJoined || !participantId || !boardParams?.id || !currentPassword) return undefined;
+    if (!isJoined || !participantId || !boardParams?.id || !currentPassword) return undefined;
 
     const slotKeys = Object.entries(availability)
       .filter(([, users]) => Array.isArray(users) && users.includes(currentUser))
@@ -897,7 +756,7 @@ export default function App() {
     }, 350);
 
     return () => window.clearTimeout(timer);
-  }, [availability, boardDataSource, boardParams?.id, currentPassword, currentUser, isJoined, participantId]);
+  }, [availability, boardParams?.id, currentPassword, currentUser, isJoined, participantId]);
 
   const applyCalendarAvailability = (isSlotAvailable, { replaceCurrentUser = false } = {}) => {
     const nextWaveSlots = {};
@@ -1177,7 +1036,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
           캘린더 일정이 없는 시간을 내 가능 시간으로 자동 표시합니다.
         </p>
         <div className="mt-4 rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] px-4 py-3 text-sm text-[#333333]">
-          Google 계정을 연결하고 캘린더를 선택하면 바로 채워집니다.
+          현재 Google 앱 검수 전이라 테스터 계정만 사용할 수 있습니다. Slack DM으로 Gmail 주소를 보내주시면 테스터 계정에 추가해드릴게요.
         </div>
       </AppModal>
 
@@ -1689,18 +1548,14 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                   )}
                 </div>
 
-                {isLocalTestingMode ? (
-                  <p className="mt-4 rounded-[12px] bg-[#eef8f1] px-3 py-2 text-xs leading-relaxed text-[#19734d]">
-                    현재 로컬 테스트 모드입니다. 만든 모임과 응답은 이 브라우저에만 저장되며, Supabase를 연결하면 실제 저장 모드로 전환됩니다.
-                  </p>
-                ) : !isSupabaseConfigured && (
+                {!isSupabaseConfigured && (
                   <p className="mt-4 rounded-[12px] bg-[#fff8e8] px-3 py-2 text-xs leading-relaxed text-[#8a6418]">
                     모임을 만들려면 Supabase 환경변수 설정이 필요합니다.
                   </p>
                 )}
                 <button 
                   onClick={handleCreateMeeting}
-                  disabled={isCreatingMeeting || (!isSupabaseConfigured && !isLocalTestingMode)}
+                  disabled={isCreatingMeeting || !isSupabaseConfigured}
                   className="w-full mt-4 bg-[#19734d] hover:bg-[#2b9668] text-white font-semibold text-base py-4 rounded-full flex items-center justify-center gap-2 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isCreatingMeeting ? '모임 만드는 중...' : meetingType === MEETING_TYPES.REGULAR ? '정기 모임 보드 만들기' : '보드 생성하기'} <ArrowRight size={20} />
