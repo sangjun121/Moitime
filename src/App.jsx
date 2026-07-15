@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Copy, CheckCircle2, AlertCircle, MessageSquare, Info, MousePointer2, Calendar, Link as LinkIcon, ArrowRight, Trash2, Wand2, ChevronLeft, ChevronRight, Clock, Users, Slack } from 'lucide-react';
+import { Copy, CheckCircle2, AlertCircle, MessageSquare, Info, MousePointer2, Calendar, Link as LinkIcon, ArrowRight, Wand2, ChevronLeft, ChevronRight, Clock, Users, Slack } from 'lucide-react';
 
 const buildBoardHours = (start, end) => {
   const hours = [];
@@ -35,23 +35,9 @@ const createDemoAvailability = (dates, start, end) => {
 const SLACK_NOTIFICATION = 'Slack';
 const CREATOR_NOTIFICATION_CHANNELS = [SLACK_NOTIFICATION];
 const NO_CREATOR_NOTIFICATION = '받지 않음';
-
-const FALLBACK_CONFIRMATION_CANDIDATES = [
-  { id: 'fallback-2026-07-16-19:00', date: '2026-07-16', hour: '19:00', label: '7월 16일 목요일 19:00', availableCount: null },
-  { id: 'fallback-2026-07-17-20:00', date: '2026-07-17', hour: '20:00', label: '7월 17일 금요일 20:00', availableCount: null },
-];
-
-const formatFinalTimeLabel = (date, hour) => {
-  const targetDate = new Date(`${date}T00:00:00`);
-  const month = targetDate.getMonth() + 1;
-  const day = targetDate.getDate();
-  const weekday = targetDate.toLocaleDateString('ko-KR', { weekday: 'long' });
-  return `${month}월 ${day}일 ${weekday} ${hour}`;
-};
-
-const getBoardStorageKey = (boardParams) => {
-  if (!boardParams) return null;
-  return `meet-board-confirmation:${boardParams.title}:${boardParams.dates.join(',')}:${boardParams.start}-${boardParams.end}`;
+const MEETING_TYPES = {
+  FRIENDS: 'friends',
+  WORK: 'work',
 };
 
 export default function App() {
@@ -60,6 +46,7 @@ export default function App() {
   const [boardParams, setBoardParams] = useState(null);
 
   // --- 메인 페이지(생성) 폼 상태 ---
+  const [meetingType, setMeetingType] = useState(MEETING_TYPES.FRIENDS);
   const [meetingTitle, setMeetingTitle] = useState('');
   const [selectedDates, setSelectedDates] = useState([]);
   const [calendarStartDate, setCalendarStartDate] = useState(() => {
@@ -74,8 +61,6 @@ export default function App() {
   const [isCreatorNotificationEnabled, setIsCreatorNotificationEnabled] = useState(false);
   const [expectedParticipantCount, setExpectedParticipantCount] = useState('');
   const [creatorNotificationPreference, setCreatorNotificationPreference] = useState(NO_CREATOR_NOTIFICATION);
-  const [adminId, setAdminId] = useState('admin');
-  const [adminPassword, setAdminPassword] = useState('1234');
 
   // --- 보드(투표) 페이지 상태 ---
   const [currentUser, setCurrentUser] = useState('');
@@ -85,16 +70,8 @@ export default function App() {
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
   const [shareMessage, setShareMessage] = useState('');
   const [waveSlots, setWaveSlots] = useState({});
-  const [confirmedSchedule, setConfirmedSchedule] = useState(null);
-  const [creatorNotificationChannel, setCreatorNotificationChannel] = useState(NO_CREATOR_NOTIFICATION);
-  const [creatorNotified, setCreatorNotified] = useState(false);
-  const [notificationSent, setNotificationSent] = useState(false);
   const [isSlackConnectModalOpen, setIsSlackConnectModalOpen] = useState(false);
   const [slackConnectTarget, setSlackConnectTarget] = useState('home');
-  const [isAdminMode, setIsAdminMode] = useState(false);
-  const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
-  const [adminLoginId, setAdminLoginId] = useState('');
-  const [adminLoginPassword, setAdminLoginPassword] = useState('');
   
   // 드래그 및 UI 상태
   const [isDragging, setIsDragging] = useState(false);
@@ -118,25 +95,16 @@ export default function App() {
         const parsedExpectedParticipants = parseInt(params.get('expected') || '', 10);
         const nextBoardParams = {
           title: params.get('title') || '제목 없음',
+          type: params.get('type') === MEETING_TYPES.WORK ? MEETING_TYPES.WORK : MEETING_TYPES.FRIENDS,
           dates: (params.get('dates') || '').split(',').filter(Boolean),
           start: parseInt(params.get('start') || '9', 10),
           end: parseInt(params.get('end') || '18', 10),
           expectedParticipants: Number.isFinite(parsedExpectedParticipants) && parsedExpectedParticipants > 0 ? parsedExpectedParticipants : null,
-          notificationChannel: params.get('notify') === SLACK_NOTIFICATION ? SLACK_NOTIFICATION : NO_CREATOR_NOTIFICATION,
-          adminId: params.get('adminId') || 'admin',
-          adminPassword: params.get('adminPw') || '1234'
+          notificationChannel: params.get('notify') === SLACK_NOTIFICATION ? SLACK_NOTIFICATION : NO_CREATOR_NOTIFICATION
         };
 
         setBoardParams(nextBoardParams);
         setAppState('board');
-        const savedConfirmation = (() => {
-          try {
-            const storageKey = getBoardStorageKey(nextBoardParams);
-            return JSON.parse(window.localStorage.getItem(storageKey) || '{}');
-          } catch {
-            return {};
-          }
-        })();
         
         // 보드 이동 시 초기화
         if (params.get('demo') === '1') {
@@ -152,14 +120,6 @@ export default function App() {
         setSelectedResultIndex(0);
         setShareMessage('');
         setWaveSlots({});
-        setConfirmedSchedule(savedConfirmation.confirmedSchedule || null);
-        setCreatorNotificationChannel(nextBoardParams.notificationChannel);
-        setCreatorNotified(Boolean(savedConfirmation.creatorNotified));
-        setNotificationSent(Boolean(savedConfirmation.notificationSent));
-        setIsAdminMode(false);
-        setIsAdminLoginOpen(false);
-        setAdminLoginId('');
-        setAdminLoginPassword('');
       } else {
         setAppState('home');
       }
@@ -253,23 +213,21 @@ export default function App() {
   const handleCreateMeeting = () => {
     if (selectedDates.length === 0) { alert("날짜를 하루 이상 선택해주세요."); return; }
     if (parseInt(startHour) >= parseInt(endHour)) { alert("시작 시간이 종료 시간보다 빨라야 합니다."); return; }
-    if (isCreatorNotificationEnabled && expectedParticipantCount && parseInt(expectedParticipantCount, 10) < 1) { alert("예상 참여 인원은 1명 이상으로 입력해주세요."); return; }
-    if (isCreatorNotificationEnabled && (!adminId.trim() || !adminPassword.trim())) { alert("관리자 임시 ID와 비밀번호를 입력해주세요."); return; }
+    if (meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled && expectedParticipantCount && parseInt(expectedParticipantCount, 10) < 1) { alert("예상 참여 인원은 1명 이상으로 입력해주세요."); return; }
     const safeMeetingTitle = meetingTitle.trim() || '모임';
 
     const params = new URLSearchParams({
       title: safeMeetingTitle,
+      type: meetingType,
       dates: selectedDates.join(','),
       start: startHour,
-      end: endHour,
-      adminId: isCreatorNotificationEnabled ? adminId.trim() : 'admin',
-      adminPw: isCreatorNotificationEnabled ? adminPassword.trim() : '1234'
+      end: endHour
     });
 
-    if (isCreatorNotificationEnabled && expectedParticipantCount) {
+    if (meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled && expectedParticipantCount) {
       params.set('expected', expectedParticipantCount);
     }
-    params.set('notify', isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION);
+    params.set('notify', meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION);
     
     window.location.hash = `board?${params.toString()}`;
   };
@@ -287,22 +245,7 @@ export default function App() {
       setParticipants([...participants, currentUser.trim()]);
     }
     setIsJoined(true);
-    showToast(`${currentUser}님으로 참여했습니다.`);
-  };
-
-  const handleAdminLogin = (e) => {
-    e.preventDefault();
-    if (!boardParams) return;
-
-    if (adminLoginId.trim() === boardParams.adminId && adminLoginPassword === boardParams.adminPassword) {
-      setIsAdminMode(true);
-      setIsAdminLoginOpen(false);
-      setAdminLoginPassword('');
-      showToast('관리자 모드로 전환했습니다.');
-      return;
-    }
-
-    alert('관리자 ID 또는 비밀번호가 맞지 않습니다.');
+    showToast(boardParams?.type === MEETING_TYPES.FRIENDS ? `${currentUser}님으로 시작했어요.` : `${currentUser}님으로 참여했습니다.`);
   };
 
   const updateSlot = (slotKey, forceMode) => {
@@ -328,7 +271,10 @@ export default function App() {
   };
 
   const handleMouseDown = (slotKey) => {
-    if (!isJoined) { alert("먼저 이름을 입력하고 참여해주세요."); return; }
+    if (!isJoined) {
+      alert(boardParams?.type === MEETING_TYPES.FRIENDS ? "먼저 닉네임을 입력하고 시작해주세요." : "먼저 이름을 입력하고 참여해주세요.");
+      return;
+    }
     const hasUser = (availability[slotKey] || []).includes(currentUser);
     const newMode = hasUser ? 'remove' : 'add';
     setIsDragging(true);
@@ -443,8 +389,18 @@ export default function App() {
 
   // 선택된 결과에 따른 메시지 템플릿
   const generatedMessage = useMemo(() => {
-    if (results.length === 0) return "입력된 시간이 없습니다.";
+    if (results.length === 0) return boardParams?.type === MEETING_TYPES.FRIENDS ? "아직 가능한 시간이 없어요." : "입력된 시간이 없습니다.";
     const selected = results[selectedResultIndex] || results[0];
+
+    if (boardParams?.type === MEETING_TYPES.FRIENDS) {
+      return `[모임 시간 공유]
+${boardParams?.title || '모임'} 시간은 여기 어때요?
+
+후보 시간: ${selected.time}
+되는 사람: ${selected.available.join(', ')}
+
+괜찮으면 이 시간으로 정해요.`;
+    }
     
     return `[약속 시간 공유]
 제목: ${boardParams?.title}
@@ -455,40 +411,6 @@ export default function App() {
 - 가능: ${selected.available.join(', ')}
 - 불가능: ${selected.unavailable.length > 0 ? selected.unavailable.join(', ') : '없음'}`;
   }, [results, selectedResultIndex, boardParams]);
-
-  const confirmationCandidates = useMemo(() => {
-    const resultCandidates = results.map(result => ({
-      id: `result-${result.date}-${result.hour}`,
-      date: result.date,
-      hour: result.hour,
-      label: formatFinalTimeLabel(result.date, result.hour),
-      availableCount: result.availableCount,
-    }));
-
-    return resultCandidates.length > 0 ? resultCandidates : FALLBACK_CONFIRMATION_CANDIDATES;
-  }, [results]);
-
-  const persistConfirmationState = (nextState) => {
-    const storageKey = getBoardStorageKey(boardParams);
-    if (!storageKey) return;
-
-    const snapshot = {
-      confirmedSchedule,
-      creatorNotificationChannel,
-      creatorNotified,
-      notificationSent,
-      ...nextState,
-    };
-
-    window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-  };
-
-  const handleConfirmFinalSchedule = (candidate) => {
-    setConfirmedSchedule(candidate);
-    setNotificationSent(false);
-    persistConfirmationState({ confirmedSchedule: candidate, notificationSent: false });
-    showToast('최종 일정이 확정되었습니다.');
-  };
 
   const handleOpenSlackConnectModal = (target) => {
     setSlackConnectTarget(target);
@@ -518,100 +440,8 @@ export default function App() {
     showToast('Slack 연동이 완료된 것으로 처리했습니다.');
   };
 
-  const handleSelectCreatorNotificationChannel = (channel) => {
-    if (channel === SLACK_NOTIFICATION) {
-      handleOpenSlackConnectModal('board');
-      return;
-    }
-
-    setCreatorNotificationChannel(channel);
-    setCreatorNotified(false);
-    setNotificationSent(false);
-    persistConfirmationState({
-      creatorNotificationChannel: channel,
-      creatorNotified: false,
-      notificationSent: false,
-    });
-    showToast(channel === NO_CREATOR_NOTIFICATION ? '생성자 알림을 받지 않도록 설정했습니다.' : `${channel} 채널로 알림을 받도록 설정했습니다.`);
-  };
-
-  const respondedParticipants = useMemo(() => (
-    participants.filter(participant => (
-      Object.values(availability).some(slotUsers => slotUsers.includes(participant))
-    ))
-  ), [participants, availability]);
-
-  const pendingParticipants = participants.filter(participant => !respondedParticipants.includes(participant));
   const boardExpectedParticipantCount = boardParams?.expectedParticipants || null;
-  const responseTargetCount = boardExpectedParticipantCount || participants.length;
-  const remainingResponseCount = Math.max(responseTargetCount - respondedParticipants.length, 0);
-  const allParticipantsResponded = responseTargetCount > 0 && respondedParticipants.length >= responseTargetCount;
-  const creatorNotificationEnabled = creatorNotificationChannel !== NO_CREATOR_NOTIFICATION;
-  const responseStatusLabel = boardExpectedParticipantCount
-    ? `${respondedParticipants.length}/${boardExpectedParticipantCount}명 응답 완료`
-    : `${respondedParticipants.length}/${participants.length}명 응답 완료`;
-
-  const handleMarkCreatorNotified = () => {
-    if (!creatorNotificationEnabled) {
-      alert('생성자 알림 채널이 선택되지 않았습니다.');
-      return;
-    }
-    if (!allParticipantsResponded) {
-      alert('아직 응답하지 않은 참여자가 있습니다.');
-      return;
-    }
-
-    setCreatorNotified(true);
-    persistConfirmationState({ creatorNotified: true });
-    showToast(`${creatorNotificationChannel}으로 생성자 알림이 도착했습니다.`);
-  };
-
-  const handleMarkFinalNotificationSent = () => {
-    if (!creatorNotificationEnabled) {
-      alert('생성자 알림 채널이 선택되지 않았습니다.');
-      return;
-    }
-    if (!confirmedSchedule) {
-      alert('먼저 최종 시간을 확정해주세요.');
-      return;
-    }
-
-    setNotificationSent(true);
-    persistConfirmationState({ notificationSent: true });
-    showToast(`${creatorNotificationChannel}으로 확정 알림을 보냈습니다.`);
-  };
-
-  const handleReserveConfirmation = (candidate) => {
-    if (!creatorNotificationEnabled) {
-      alert('초기에 설정된 Slack 채널이 없습니다.');
-      return;
-    }
-
-    const shouldSendNotification = window.confirm(`초기에 설정한 ${creatorNotificationChannel} 채널로 확정 알림을 전송하겠습니까?`);
-    if (!shouldSendNotification) return;
-
-    setConfirmedSchedule(candidate);
-    setCreatorNotified(allParticipantsResponded);
-    setNotificationSent(true);
-    persistConfirmationState({
-      confirmedSchedule: candidate,
-      creatorNotified: allParticipantsResponded,
-      notificationSent: true,
-    });
-    showToast('예약이 확정되었고 Slack 알림 전송에 성공했습니다.');
-  };
-
-  const confirmedTimeLabel = confirmedSchedule?.label || '최종 시간이 아직 확정되지 않았습니다.';
-  const creatorAlertPreviewMessage = !creatorNotificationEnabled
-    ? '생성자 알림을 받지 않도록 설정했습니다.\n응답 완료 여부는 링크에 다시 들어와 확인합니다.'
-    : allParticipantsResponded
-    ? `모든 참여자가 응답했어요.\n${boardParams?.title || '모임'}의 최종 시간을 확정해주세요.`
-    : boardExpectedParticipantCount
-      ? `아직 ${remainingResponseCount}명이 응답하지 않았어요.\n현재 응답자: ${respondedParticipants.join(', ') || '없음'}`
-      : `아직 ${pendingParticipants.length}명이 응답하지 않았어요.\n${pendingParticipants.join(', ') || '응답 대기자가 없습니다.'}`;
-  const finalNotificationPreviewMessage = confirmedSchedule
-    ? `일정이 확정됐어요.\n${boardParams?.title || '모임'}는 ${confirmedTimeLabel}에 진행됩니다.`
-    : '최종 시간이 확정되면 참여자에게 보낼 메시지가 여기에 표시됩니다.';
+  const isWorkMeeting = boardParams?.type === MEETING_TYPES.WORK;
 
   useEffect(() => {
     setShareMessage(generatedMessage);
@@ -710,14 +540,8 @@ export default function App() {
             <span className="w-9 h-9 rounded-full bg-[#0066cc] text-white flex items-center justify-center">
               <Calendar size={17} />
             </span>
-            <span className="text-xl font-bold">Meet Board</span>
+            <span className="text-xl font-bold">when7meet</span>
           </button>
-          <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-[#7a7a7a]">
-            <span className="text-[#1d1d1f]">Dates</span>
-            <span>Availability</span>
-            <span>Confirm</span>
-            <span>Notify</span>
-          </nav>
         </div>
       </header>
 
@@ -730,15 +554,18 @@ export default function App() {
             <p className="text-xs text-[#7a7a7a]">
               {appState === 'board' && boardParams
                 ? `${boardParams.dates.length}일 · ${boardParams.start}:00-${boardParams.end}:00`
-                : '가능한 날짜와 시간을 빠르게 정리합니다'}
+                : meetingType === MEETING_TYPES.FRIENDS ? '친구들과 되는 시간을 가볍게 맞춰요' : '가능한 날짜와 시간을 빠르게 정리합니다'}
             </p>
           </div>
           {appState === 'board' && (
             <button
-              onClick={() => copyToClipboard(window.location.href, '초대 링크가 복사되었습니다.')}
+              onClick={() => copyToClipboard(
+                window.location.href,
+                boardParams?.type === MEETING_TYPES.FRIENDS ? '모임 링크가 복사됐어요.' : '초대 링크가 복사되었습니다.'
+              )}
               className="text-xs sm:text-sm bg-[#0066cc] hover:bg-[#0071e3] text-white px-4 py-2 rounded-full flex items-center gap-1.5 font-semibold transition-colors"
             >
-              <LinkIcon size={14}/> 초대
+              <LinkIcon size={14}/> {boardParams?.type === MEETING_TYPES.FRIENDS ? '링크 공유' : '초대'}
             </button>
           )}
         </div>
@@ -746,22 +573,33 @@ export default function App() {
 
       <main>
         
-        {}
         {/* =========================================
             메인 페이지 (Home / Create Event) 
             ========================================= */}
         {appState === 'home' && (
           <div className="animate-in fade-in">
             <section className="relative px-4 pt-12 pb-12 sm:pt-20 sm:pb-16 text-center overflow-hidden">
-              <p className="text-sm font-semibold text-[#0066cc] mb-4 animate-fade-up">Meet Board</p>
+              <p className="text-sm font-semibold text-[#0066cc] mb-4 animate-fade-up">when7meet</p>
               <h2 className="mx-auto max-w-4xl text-[clamp(48px,8vw,104px)] font-semibold leading-[0.95] text-[#1d1d1f]">
-                <span className="inline-block animate-word-pop delay-100">모두의</span>{' '}
-                <span className="inline-block animate-word-pop delay-300">시간을</span><br />
-                <span className="inline-block animate-word-pop delay-500">가볍게</span>{' '}
-                <span className="inline-block animate-word-pop delay-700">맞춰요</span>
+                {meetingType === MEETING_TYPES.FRIENDS ? (
+                  <>
+                    <span className="inline-block animate-word-pop delay-100">우리</span>{' '}
+                    <span className="inline-block animate-word-pop delay-300">언제</span><br />
+                    <span className="inline-block animate-word-pop delay-500">만날까?</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="inline-block animate-word-pop delay-100">모두의</span>{' '}
+                    <span className="inline-block animate-word-pop delay-300">시간을</span><br />
+                    <span className="inline-block animate-word-pop delay-500">가볍게</span>{' '}
+                    <span className="inline-block animate-word-pop delay-700">맞춰요</span>
+                  </>
+                )}
               </h2>
               <p className="mx-auto mt-6 max-w-2xl text-base sm:text-xl leading-relaxed text-[#333333] animate-fade-up delay-900">
-                후보 날짜를 고르고, 각자 가능한 시간을 칠한 뒤 최종 확정 시간과 알림 선호도까지 한 흐름에서 확인합니다.
+                {meetingType === MEETING_TYPES.FRIENDS
+                  ? '날짜 몇 개만 고르고 링크를 보내세요. 친구들이 되는 시간만 칠하면 바로 보기 좋게 정리됩니다.'
+                  : '후보 날짜를 고르고, 각자 가능한 시간을 칠한 뒤 응답 현황까지 한 흐름에서 확인합니다.'}
               </p>
             </section>
 
@@ -769,20 +607,56 @@ export default function App() {
             {/* 약속 만들기 */}
             <div className="w-full bg-white p-5 sm:p-8 rounded-[18px] border border-[#e0e0e0]">
               <div className="mb-7">
-                <p className="text-sm font-semibold text-[#1d1d1f] mb-2">새 약속</p>
-                <h2 className="text-2xl sm:text-3xl font-semibold mb-2 text-[#1d1d1f]">가능한 날짜를 먼저 고르세요</h2>
-                <p className="text-sm text-[#7a7a7a]">후보 날짜와 시간대를 정하면 바로 투표 보드가 만들어집니다.</p>
+                <p className="text-sm font-semibold text-[#1d1d1f] mb-2">{meetingType === MEETING_TYPES.FRIENDS ? '새 모임' : '새 일정'}</p>
+                <h2 className="text-2xl sm:text-3xl font-semibold mb-2 text-[#1d1d1f]">
+                  {meetingType === MEETING_TYPES.FRIENDS ? '친구들이랑 만날 날짜를 골라요' : '가능한 날짜를 먼저 고르세요'}
+                </h2>
+                <p className="text-sm text-[#7a7a7a]">
+                  {meetingType === MEETING_TYPES.FRIENDS ? '후보 날짜와 시간대를 정하면 바로 공유할 수 있는 모임 보드가 만들어집니다.' : '후보 날짜와 시간대를 정하면 바로 투표 보드가 만들어집니다.'}
+                </p>
               </div>
               
               <div className="space-y-6">
                 <div>
-                  <label className="block text-sm font-semibold text-[#333333] mb-2">약속 이름</label>
+                  <label className="block text-sm font-semibold text-[#333333] mb-2">어떤 약속인가요?</label>
+                  <div className="grid grid-cols-2 gap-2 rounded-[18px] bg-[#f5f5f7] p-2 border border-[#e0e0e0]">
+                    {[
+                      { type: MEETING_TYPES.FRIENDS, title: '친구 모임', description: '가볍게 공유하고 정하기' },
+                      { type: MEETING_TYPES.WORK, title: '업무 일정', description: '응답 완료 Slack 알림 사용' },
+                    ].map(option => {
+                      const isSelected = meetingType === option.type;
+                      return (
+                        <button
+                          key={option.type}
+                          type="button"
+                          onClick={() => {
+                            setMeetingType(option.type);
+                            if (option.type === MEETING_TYPES.FRIENDS) {
+                              setIsCreatorNotificationEnabled(false);
+                              setExpectedParticipantCount('');
+                              setCreatorNotificationPreference(NO_CREATOR_NOTIFICATION);
+                            }
+                          }}
+                          className={`rounded-[14px] px-4 py-4 text-left transition-colors ${
+                            isSelected ? 'bg-white text-[#1d1d1f] border border-[#0066cc]' : 'text-[#7a7a7a] hover:bg-white/70 border border-transparent'
+                          }`}
+                        >
+                          <span className="block text-sm font-semibold">{option.title}</span>
+                          <span className="mt-1 block text-xs">{option.description}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-[#333333] mb-2">{meetingType === MEETING_TYPES.FRIENDS ? '모임 이름' : '일정 이름'}</label>
                   <input 
                     type="text" 
                     value={meetingTitle}
                     onChange={(e) => setMeetingTitle(e.target.value)}
                     className="w-full border-0 bg-[#f5f5f7] rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
-                    placeholder="미입력 시 모임"
+                    placeholder={meetingType === MEETING_TYPES.FRIENDS ? '예: 성수에서 저녁' : '미입력 시 모임'}
                   />
                 </div>
 
@@ -876,19 +750,6 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-
-                  {/* 선택된 날짜 목록 */}
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {selectedDates.length === 0 && <span className="text-sm text-[#7a7a7a]">선택된 날짜가 없습니다.</span>}
-                    {selectedDates.map(d => (
-	                      <span key={d} className="inline-flex items-center gap-1 bg-[#e8f2ff] text-[#0071e3] px-3 py-1 rounded-full text-sm font-semibold">
-                        {d}
-                        <button onClick={() => setSelectedDates(selectedDates.filter(date => date !== d))} className="text-[#7a7a7a] hover:text-red-500 ml-1">
-                          <Trash2 size={14} />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
                 </div>
 
                 <div>
@@ -923,6 +784,7 @@ export default function App() {
                   </p>
                 </div>
 
+                {meetingType === MEETING_TYPES.WORK && (
                 <div className="rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
                   <div className="mb-4 flex items-start justify-between gap-4">
                     <div>
@@ -987,45 +849,14 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className={`mt-4 border-t border-[#e0e0e0] pt-4 ${isCreatorNotificationEnabled ? '' : 'opacity-45'}`}>
-                    <div className="mb-3">
-                      <label className="block text-sm font-semibold text-[#333333] mb-1">관리자 임시 계정</label>
-                      <p className="text-xs leading-relaxed text-[#7a7a7a]">
-                        알림 확인과 최종 확정 기능을 열 때 사용합니다.
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">관리자 ID</label>
-                      <input
-                        type="text"
-                        disabled={!isCreatorNotificationEnabled}
-                        value={adminId}
-                        onChange={(e) => setAdminId(e.target.value)}
-                        className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a] disabled:cursor-not-allowed"
-                        placeholder="admin"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">임시 비밀번호</label>
-                      <input
-                        type="password"
-                        disabled={!isCreatorNotificationEnabled}
-                        value={adminPassword}
-                        onChange={(e) => setAdminPassword(e.target.value)}
-                        className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a] disabled:cursor-not-allowed"
-                        placeholder="1234"
-                      />
-                    </div>
-                    </div>
-                  </div>
                 </div>
+                )}
 
                 <button 
                   onClick={handleCreateMeeting}
 	                  className="w-full mt-4 bg-[#0066cc] hover:bg-[#0071e3] text-white font-semibold text-base py-4 rounded-full flex items-center justify-center gap-2 transition-colors"
                 >
-                  보드 생성하기 <ArrowRight size={20} />
+                  {meetingType === MEETING_TYPES.FRIENDS ? '모임 보드 만들기' : '보드 생성하기'} <ArrowRight size={20} />
                 </button>
               </div>
             </div>
@@ -1034,7 +865,6 @@ export default function App() {
           </div>
         )}
 
-        {}
         {/* =========================================
             보드 페이지 (Board / Vote) 
             ========================================= */}
@@ -1060,7 +890,7 @@ export default function App() {
                 </div>
                 <div className="space-y-1 mt-3">
                   <div className="text-xs font-semibold text-[#7a7a7a] flex justify-between">
-                    <span>불가능</span>
+                    <span>{isWorkMeeting ? '불가능' : '아직 안 고름'}</span>
                     <span>
                       {participants.filter(p => !(availability[tooltipData.slotKey] || []).includes(p)).length}명
                     </span>
@@ -1079,26 +909,7 @@ export default function App() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 text-sm font-semibold text-[#0066cc] mb-3">
                     <Calendar size={16} />
-                    약속 보드
-                    {creatorNotificationEnabled && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isAdminMode) {
-                            setIsAdminMode(false);
-                            return;
-                          }
-                          setIsAdminLoginOpen(prev => !prev);
-                        }}
-                        className={`ml-2 rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
-                          isAdminMode
-                            ? 'bg-[#e8f2ff] text-[#0066cc]'
-                            : 'bg-[#f5f5f7] text-[#333333] hover:bg-[#e8f2ff] hover:text-[#0066cc]'
-                        }`}
-                      >
-                        {isAdminMode ? '관리자 나가기' : '관리자'}
-                      </button>
-                    )}
+                    {isWorkMeeting ? '약속 보드' : '모임 보드'}
                   </div>
                   <h2 className="text-3xl sm:text-5xl font-semibold leading-[0.95] text-[#1d1d1f] truncate">{boardParams.title}</h2>
                   <div className="flex flex-wrap gap-2 mt-5">
@@ -1109,9 +920,9 @@ export default function App() {
                       <Clock size={13} /> {boardParams.start}:00-{boardParams.end}:00
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs font-semibold text-[#333333]">
-                      <Users size={13} /> {participants.length}명 참여
+                      <Users size={13} /> {participants.length}명 {isWorkMeeting ? '참여' : '함께'}
                     </span>
-                    {boardExpectedParticipantCount && (
+                    {isWorkMeeting && boardExpectedParticipantCount && (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-[#e8f2ff] px-3 py-1.5 text-xs font-semibold text-[#0066cc]">
                         예상 {boardExpectedParticipantCount}명
                       </span>
@@ -1126,12 +937,12 @@ export default function App() {
                       value={currentUser}
                       onChange={(e) => setCurrentUser(e.target.value)}
                       disabled={isJoined}
-                      placeholder="이름 입력"
+                      placeholder={isWorkMeeting ? '이름 입력' : '닉네임'}
                       className="min-w-0 flex-1 lg:w-40 border-0 bg-transparent px-3 py-2 text-sm text-[#1d1d1f] placeholder:text-[#7a7a7a] focus:ring-0 outline-none disabled:text-[#7a7a7a]"
                     />
                     {!isJoined ? (
                       <button type="submit" className="bg-[#0066cc] hover:bg-[#0071e3] text-white px-4 py-2 rounded-full text-sm font-semibold transition-colors">
-                        참여
+                        {isWorkMeeting ? '참여' : '시작'}
                       </button>
                     ) : (
                       <button type="button" onClick={() => { setIsJoined(false); setCurrentUser(''); }} className="bg-white hover:bg-[#f0f0f0] text-[#1d1d1f] px-4 py-2 rounded-full text-sm font-semibold transition-colors">
@@ -1141,33 +952,8 @@ export default function App() {
                   </div>
                 </form>
               </div>
-              {creatorNotificationEnabled && !isAdminMode && isAdminLoginOpen && (
-                <form onSubmit={handleAdminLogin} className="mt-6 grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 rounded-[18px] bg-[#f5f5f7] p-4 border border-[#f0f0f0]">
-                  <input
-                    type="text"
-                    value={adminLoginId}
-                    onChange={(e) => setAdminLoginId(e.target.value)}
-                    className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
-                    placeholder="관리자 ID"
-                  />
-                  <input
-                    type="password"
-                    value={adminLoginPassword}
-                    onChange={(e) => setAdminLoginPassword(e.target.value)}
-                    className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
-                    placeholder="임시 비밀번호"
-                  />
-                  <button
-                    type="submit"
-                    className="rounded-full bg-[#0066cc] hover:bg-[#0071e3] text-white px-5 py-3 text-sm font-semibold transition-colors"
-                  >
-                    확인
-                  </button>
-                </form>
-              )}
             </section>
 
-            {}
             {/* 메인 투표 그리드 영역 */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
               {/* 내 가능 시간 칠하기 */}
@@ -1175,16 +961,21 @@ export default function App() {
                 {!isJoined && (
                   <div className="absolute inset-0 bg-white/80 backdrop-blur-[1px] z-20 flex flex-col items-center justify-center rounded-[18px]">
                     <AlertCircle className="text-[#7a7a7a] mb-2" size={32} />
-                    <p className="text-[#333333] font-semibold">위쪽에 이름을 입력하고 참여해주세요</p>
+                    <p className="text-[#333333] font-semibold">
+                      {isWorkMeeting ? '위쪽에 이름을 입력하고 참여해주세요' : '위쪽에 닉네임을 입력하고 시작해주세요'}
+                    </p>
                   </div>
                 )}
                 
                 <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-[#1d1d1f]">내 가능 시간</h3>
-                    <p className="text-xs text-[#7a7a7a] mt-1">가능한 칸을 눌러 초록색으로 표시하세요.</p>
+                    <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '내 가능 시간' : '내가 되는 시간'}</h3>
+                    <p className="text-xs text-[#7a7a7a] mt-1">
+                      {isWorkMeeting ? '가능한 칸을 눌러 초록색으로 표시하세요.' : '되는 시간만 톡톡 눌러 표시하세요.'}
+                    </p>
                   </div>
                   
+                  {isWorkMeeting && (
                   <button 
                     onClick={handleSyncGoogleCalendar}
                     disabled={!isJoined || isCalendarAutoFilling}
@@ -1193,12 +984,13 @@ export default function App() {
                     <Wand2 size={14}/>
                     {isCalendarAutoFilling ? '캘린더 확인 중...' : '구글 캘린더 연결'}
                   </button>
+                  )}
                 </div>
                 <div className="flex items-center justify-between gap-3 mb-3 text-xs text-[#7a7a7a]">
                   <span className="inline-flex items-center gap-1"><MousePointer2 size={12}/> 클릭 또는 드래그</span>
                   <span className="flex items-center gap-3">
-                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#0066cc]" /> 가능</span>
-                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border border-[#e0e0e0]" /> 불가능</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#0066cc]" /> {isWorkMeeting ? '가능' : '됨'}</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border border-[#e0e0e0]" /> {isWorkMeeting ? '불가능' : '아직'}</span>
                   </span>
                 </div>
 
@@ -1247,11 +1039,13 @@ export default function App() {
               <section className="bg-white p-5 sm:p-6 rounded-[18px] border border-[#e0e0e0]">
                 <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-4">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-[#1d1d1f]">그룹 전체 시간</h3>
-                    <p className="text-xs text-[#7a7a7a] mt-1">진한 파랑일수록 가능한 사람이 많습니다.</p>
+                    <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '그룹 전체 시간' : '다 같이 되는 시간'}</h3>
+                    <p className="text-xs text-[#7a7a7a] mt-1">
+                      {isWorkMeeting ? '진한 파랑일수록 가능한 사람이 많습니다.' : '진하게 표시될수록 같이 만날 가능성이 높아요.'}
+                    </p>
                   </div>
                   <span className="text-xs text-[#7a7a7a] flex items-center gap-1">
-                    <Info size={12}/> {participants.length}명 참여
+                    <Info size={12}/> {participants.length}명 {isWorkMeeting ? '참여' : '함께'}
                   </span>
                 </div>
 
@@ -1306,20 +1100,19 @@ export default function App() {
               </section>
             </div>
 
-            {}
             {/* 결과 요약 및 공유 */}
             <section className="bg-white p-5 sm:p-6 rounded-[18px] border border-[#e0e0e0]">
 	               <div className="flex items-center gap-2 mb-6">
-	                  <h3 className="font-semibold text-[#1d1d1f]">결과 요약</h3>
+	                  <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '결과 요약' : '언제 만날까요?'}</h3>
                 </div>
                 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className={`grid grid-cols-1 ${isWorkMeeting ? 'md:grid-cols-2' : 'lg:grid-cols-[0.9fr_1.1fr]'} gap-8`}>
                   {/* Top 결과 카드 */}
                   <div>
-	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3">가장 많이 겹친 시간</h4>
+	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3">{isWorkMeeting ? '가장 많이 겹친 시간' : '많이 되는 시간'}</h4>
                     {results.length === 0 ? (
 	                      <div className="text-sm text-[#7a7a7a] bg-[#f5f5f7] p-5 rounded-[18px] border border-[#f0f0f0] text-center py-8">
-                        아직 선택된 가능 시간이 없습니다.
+                        {isWorkMeeting ? '아직 선택된 가능 시간이 없습니다.' : '아직 친구들이 고른 시간이 없어요.'}
                       </div>
                     ) : (
                       <div className="space-y-3">
@@ -1337,13 +1130,31 @@ export default function App() {
 	                                {idx !== 0 && isSelected && <span className="text-xs font-semibold text-[#333333] bg-white px-2 py-0.5 rounded-full mb-1 inline-block">선택됨</span>}
 	                                <div className={`font-semibold ${isSelected ? 'text-[#0071e3] text-lg' : 'text-[#1d1d1f]'}`}>{res.time}</div>
                                 <div className="text-xs text-[#7a7a7a] mt-1">
-                                  가능: {res.available.join(', ')} <br/>
-                                  <span className="text-[#7a7a7a]">불가능: {res.unavailable.length > 0 ? res.unavailable.join(', ') : '없음'}</span>
+                                  {isWorkMeeting ? '가능' : '되는 사람'}: {res.available.join(', ')}
+                                  {isWorkMeeting && (
+                                    <>
+                                      <br/>
+                                      <span className="text-[#7a7a7a]">불가능: {res.unavailable.length > 0 ? res.unavailable.join(', ') : '없음'}</span>
+                                    </>
+                                  )}
                                 </div>
                               </div>
 	                              <div className={`text-center rounded-[14px] px-3 py-2 ${isSelected ? 'bg-white' : 'bg-[#f5f5f7]'}`}>
-                                <div className="text-xs text-[#7a7a7a]">참석</div>
+                                <div className="text-xs text-[#7a7a7a]">{isWorkMeeting ? '참석' : '가능'}</div>
 	                                <div className={`font-semibold ${isSelected ? 'text-[#0071e3]' : 'text-[#333333]'}`}>{res.availableCount}명</div>
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setSelectedResultIndex(idx);
+                                      showToast(isWorkMeeting ? '선택한 시간으로 공유 메시지를 만들었습니다.' : '이 시간으로 정했어요. 공유 메시지를 복사해보세요.');
+                                    }}
+                                    className={`mt-2 rounded-full px-3 py-1 text-[11px] font-semibold transition-colors ${
+                                      isSelected ? 'bg-[#0066cc] text-white' : 'bg-white text-[#0066cc] hover:bg-[#e8f2ff]'
+                                    }`}
+                                  >
+                                    이 시간으로 정하기
+                                  </button>
                               </div>
                             </div>
                           );
@@ -1355,118 +1166,37 @@ export default function App() {
                   {/* 공유 텍스트 */}
                   <div className="flex flex-col h-full">
 	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3 flex items-center gap-1">
-                      <MessageSquare size={14}/> 공유 메시지
+                      <MessageSquare size={14}/> {isWorkMeeting ? '공유 메시지' : '친구들에게 보낼 메시지'}
                     </h4>
+                    {!isWorkMeeting && (
+                      <p className="mb-3 text-sm text-[#7a7a7a]">
+                        선택한 시간을 기준으로 바로 복사해서 카톡이나 DM에 붙여 넣으면 됩니다.
+                      </p>
+                    )}
                     <textarea 
                       value={shareMessage}
                       onChange={(e) => setShareMessage(e.target.value)}
 	                      className="w-full flex-1 border-0 rounded-[18px] p-4 text-sm text-[#333333] bg-[#f5f5f7] focus:outline-none focus:ring-2 focus:ring-[#0071e3] resize-none min-h-[160px] font-mono"
                     />
                     <button 
-                      onClick={() => copyToClipboard(shareMessage, '공유 메시지가 복사되었습니다.')}
+                      onClick={() => copyToClipboard(
+                        shareMessage,
+                        isWorkMeeting ? '공유 메시지가 복사되었습니다.' : '친구들에게 보낼 메시지가 복사됐어요.'
+                      )}
 	                      className="mt-4 w-full bg-[#0066cc] hover:bg-[#0071e3] text-white font-semibold py-3 rounded-full flex items-center justify-center gap-2 transition-colors"
                     >
                       <Copy size={16} />
-                      공유 메시지 복사
+                      {isWorkMeeting ? '공유 메시지 복사' : '메시지 복사하기'}
                     </button>
                   </div>
                 </div>
             </section>
 
-            {creatorNotificationEnabled && isAdminMode && (
-            <section className="mt-5 bg-white p-5 sm:p-6 rounded-[18px] border border-[#e0e0e0]">
-              <div className="flex flex-col lg:flex-row lg:items-start gap-6 justify-between mb-6">
-                <div>
-                  <p className="text-sm font-semibold text-[#1d1d1f] mb-2">관리자 알림</p>
-                  <h3 className="text-2xl font-semibold text-[#1d1d1f]">예약 확정 관리</h3>
-                  <p className="text-sm text-[#7a7a7a] mt-2">
-                    {creatorNotificationEnabled
-                      ? `초기에 지정한 ${creatorNotificationChannel} 채널로 예상 인원 응답 완료 알림이 전송됩니다.`
-                      : '초기에 설정한 Slack 알림이 없습니다.'}
-                  </p>
-                </div>
-                {notificationSent && creatorNotificationEnabled && (
-                  <div className="rounded-[18px] bg-[#e8f2ff] px-4 py-3 text-sm text-[#1d1d1f] border border-[#d6eaff]">
-                    확정 알림을 보냈어요. {creatorNotificationChannel} 채널로 참여자 {participants.length}명에게 보낸 것으로 표시했습니다.
-                  </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-[0.85fr_1.15fr] gap-5">
-                <div className="rounded-[18px] bg-[#f5f5f7] p-5 border border-[#f0f0f0]">
-                  <h4 className="text-lg font-semibold text-[#1d1d1f]">초기 알림 설정</h4>
-                  <div className="mt-4 space-y-2 text-sm">
-                    <div className="flex items-center justify-between rounded-[14px] bg-white px-3 py-3">
-                      <span className="text-[#7a7a7a]">응답 완료 알림 채널</span>
-                      <span className="font-semibold text-[#1d1d1f]">{creatorNotificationEnabled ? creatorNotificationChannel : '설정 없음'}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-[14px] bg-white px-3 py-3">
-                      <span className="text-[#7a7a7a]">예상 참여 인원</span>
-                      <span className="font-semibold text-[#1d1d1f]">{boardExpectedParticipantCount ? `${boardExpectedParticipantCount}명` : '미설정'}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-[14px] bg-white px-3 py-3">
-                      <span className="text-[#7a7a7a]">현재 응답</span>
-                      <span className="font-semibold text-[#1d1d1f]">{respondedParticipants.length}명</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3">예약 확정</h4>
-                  <div className="space-y-3">
-                    {confirmationCandidates.map(candidate => {
-                      const isConfirmed = confirmedSchedule?.id === candidate.id;
-                      return (
-                        <div
-                          key={candidate.id}
-                          className={`rounded-[18px] border p-4 transition-colors ${
-                            isConfirmed ? 'border-[#0066cc] bg-[#e8f2ff]' : 'border-[#f0f0f0] bg-white'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="font-semibold text-[#1d1d1f]">{candidate.label}</div>
-                              <div className="text-xs text-[#7a7a7a] mt-1">
-                                {candidate.availableCount === null ? '검증용 기본 후보' : `${candidate.availableCount}명 가능`}
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handleReserveConfirmation(candidate)}
-                              className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
-                                isConfirmed
-                                  ? 'bg-white text-[#1d1d1f]'
-                                  : 'bg-[#0066cc] hover:bg-[#0071e3] text-white'
-                              }`}
-                            >
-                              {isConfirmed ? '확정됨' : '예약 확정하기'}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="mt-5 rounded-[18px] bg-[#f5f5f7] p-5 border border-[#f0f0f0]">
-                    <p className="text-sm font-semibold text-[#1d1d1f] mb-2">확정된 시간</p>
-                    <h4 className="text-xl font-semibold text-[#1d1d1f]">
-                      {confirmedSchedule ? '일정이 확정됐어요' : '아직 확정 전입니다'}
-                    </h4>
-                    <div className="mt-4 rounded-[18px] bg-white p-4 border border-[#e0e0e0]">
-                      <div className="text-xs text-[#7a7a7a]">최종 시간</div>
-                      <div className="mt-1 text-lg font-semibold text-[#1d1d1f]">{confirmedTimeLabel}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </section>
-            )}
           </div>
           </div>
         )}
       </main>
       
-      {}
       {/* CSS Animation */}
       <style>{`
         :root {
