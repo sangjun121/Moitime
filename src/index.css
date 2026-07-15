@@ -123,6 +123,12 @@
   touch-action: auto;
 }
 
+.calendar-date-button {
+  min-height: 44px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -172,9 +178,29 @@
     font-size: 14px;
   }
 
+  .calendar-picker-panel {
+    padding: 12px !important;
+  }
+
   .calendar-picker-grid {
-    grid-template-columns: 36px repeat(7, minmax(0, 1fr)) 36px;
-    gap: 2px;
+    grid-template-columns: 0 repeat(7, minmax(44px, 1fr)) 0;
+    gap: 4px;
+    padding-bottom: 2px;
+  }
+
+  .calendar-date-button {
+    width: 100%;
+    min-width: 44px;
+    height: 44px !important;
+    border-radius: 12px;
+    font-size: 15px;
+  }
+
+  .calendar-month-label,
+  .calendar-year-label {
+    visibility: hidden;
+    width: 0;
+    overflow: hidden;
   }
 
   .modal-actions {

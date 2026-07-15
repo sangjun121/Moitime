@@ -16,6 +16,7 @@ const buildBoardHours = (start, end) => {
 const SLACK_NOTIFICATION = 'Slack';
 const CREATOR_NOTIFICATION_CHANNELS = [SLACK_NOTIFICATION];
 const NO_CREATOR_NOTIFICATION = '받지 않음';
+const DRAG_START_THRESHOLD = 6;
 const MEETING_TYPES = {
   REGULAR: 'regular',
   WORK: 'work',
@@ -349,10 +350,13 @@ export default function App() {
   const [dialog, setDialog] = useState(null);
   const lastSavedAvailabilityRef = useRef(null);
   const availabilityRef = useRef(availability);
+  const currentUserRef = useRef(currentUser);
+  const pendingLocalSlotKeysRef = useRef(null);
   const isDraggingRef = useRef(false);
   const dragModeRef = useRef(null);
   const activePointerIdRef = useRef(null);
   const activePointerTargetRef = useRef(null);
+  const pointerStartRef = useRef(null);
   const lastPaintedSlotRef = useRef(null);
   const googleAccessTokenRef = useRef(null);
 
@@ -376,6 +380,44 @@ export default function App() {
     availabilityRef.current = availability;
   }, [availability]);
 
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  const getCurrentUserSlotKeys = (nextAvailability) => (
+    Object.entries(nextAvailability)
+      .filter(([, users]) => Array.isArray(users) && users.includes(currentUserRef.current))
+      .map(([slotKey]) => slotKey)
+      .sort()
+  );
+
+  const setAvailabilitySafely = (nextAvailability, { markLocalPending = false } = {}) => {
+    availabilityRef.current = nextAvailability;
+    if (markLocalPending) {
+      pendingLocalSlotKeysRef.current = getCurrentUserSlotKeys(nextAvailability);
+    }
+    setAvailability(nextAvailability);
+  };
+
+  const mergeAvailabilityWithPendingLocal = (remoteAvailability) => {
+    const pendingSlotKeys = pendingLocalSlotKeysRef.current;
+    const localUser = currentUserRef.current;
+    if (!pendingSlotKeys || !localUser) return remoteAvailability;
+
+    const mergedAvailability = {};
+    Object.entries(remoteAvailability).forEach(([slotKey, users]) => {
+      const nextUsers = (Array.isArray(users) ? users : []).filter(user => user !== localUser);
+      if (nextUsers.length > 0) mergedAvailability[slotKey] = nextUsers;
+    });
+
+    pendingSlotKeys.forEach(slotKey => {
+      const slotUsers = mergedAvailability[slotKey] || [];
+      mergedAvailability[slotKey] = slotUsers.includes(localUser) ? slotUsers : [...slotUsers, localUser];
+    });
+
+    return mergedAvailability;
+  };
+
   // --- URL Hash 기반 라우팅 ---
   useEffect(() => {
     let isActive = true;
@@ -396,6 +438,13 @@ export default function App() {
       setGoogleCalendars([]);
       setSelectedCalendarIds([]);
       lastSavedAvailabilityRef.current = null;
+      pendingLocalSlotKeysRef.current = null;
+      isDraggingRef.current = false;
+      dragModeRef.current = null;
+      activePointerIdRef.current = null;
+      activePointerTargetRef.current = null;
+      pointerStartRef.current = null;
+      lastPaintedSlotRef.current = null;
     };
 
     const handleHashChange = async () => {
@@ -445,7 +494,7 @@ export default function App() {
 
         setBoardParams(remoteBoard.boardParams);
         setParticipants(remoteBoard.participants);
-        setAvailability(remoteBoard.availability);
+        setAvailabilitySafely(remoteBoard.availability);
         setIsBoardLoading(false);
       } catch (error) {
         if (!isActive || window.location.hash !== hash) return;
@@ -471,7 +520,7 @@ export default function App() {
         const remoteBoard = await loadMeeting(boardParams.id);
         if (!isActive) return;
         setParticipants(remoteBoard.participants);
-        setAvailability(remoteBoard.availability);
+        setAvailabilitySafely(mergeAvailabilityWithPendingLocal(remoteBoard.availability));
       } catch (error) {
         if (isActive) showToast(error instanceof Error ? error.message : '응답을 새로고침하지 못했습니다.');
       }
@@ -697,6 +746,7 @@ export default function App() {
       else delete nextAvailability[slotKey];
 
       availabilityRef.current = nextAvailability;
+      pendingLocalSlotKeysRef.current = getCurrentUserSlotKeys(nextAvailability);
       return nextAvailability;
     });
 
@@ -706,6 +756,11 @@ export default function App() {
     if (!slotKey || !mode || lastPaintedSlotRef.current === slotKey) return;
     lastPaintedSlotRef.current = slotKey;
     updateSlot(slotKey, mode);
+  };
+
+  const getSlotKeyFromPoint = (x, y) => {
+    const target = document.elementFromPoint(x, y);
+    return target?.closest?.('[data-availability-slot]')?.dataset.availabilitySlot;
   };
 
   const handleAvailabilityPointerDown = (event, slotKey) => {
@@ -720,14 +775,18 @@ export default function App() {
 
     const hasUser = (availabilityRef.current[slotKey] || []).includes(currentUser);
     const newMode = hasUser ? 'remove' : 'add';
-    isDraggingRef.current = true;
+    isDraggingRef.current = false;
     dragModeRef.current = newMode;
     activePointerIdRef.current = event.pointerId;
     activePointerTargetRef.current = event.currentTarget;
+    pointerStartRef.current = {
+      slotKey,
+      x: event.clientX,
+      y: event.clientY,
+    };
     lastPaintedSlotRef.current = null;
-    setIsDragging(true);
+    setIsDragging(false);
     setDragMode(newMode);
-    paintSlot(slotKey, newMode);
   };
 
   const handleResetCurrentUserAvailability = () => {
@@ -746,6 +805,7 @@ export default function App() {
         });
 
         availabilityRef.current = nextAvailability;
+        pendingLocalSlotKeysRef.current = getCurrentUserSlotKeys(nextAvailability);
         return nextAvailability;
       });
       setWaveSlots({});
@@ -755,16 +815,27 @@ export default function App() {
   };
 
   const handleAvailabilityPointerMove = (event) => {
-    if (!isDraggingRef.current || !dragModeRef.current || activePointerIdRef.current !== event.pointerId) return;
+    if (!dragModeRef.current || activePointerIdRef.current !== event.pointerId || !pointerStartRef.current) return;
 
     event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    const cell = target?.closest?.('[data-availability-slot]');
-    paintSlot(cell?.dataset.availabilitySlot, dragModeRef.current);
+    const distanceX = event.clientX - pointerStartRef.current.x;
+    const distanceY = event.clientY - pointerStartRef.current.y;
+
+    if (!isDraggingRef.current && Math.hypot(distanceX, distanceY) < DRAG_START_THRESHOLD) return;
+
+    if (!isDraggingRef.current) {
+      isDraggingRef.current = true;
+      setIsDragging(true);
+      paintSlot(pointerStartRef.current.slotKey, dragModeRef.current);
+    }
+
+    paintSlot(getSlotKeyFromPoint(event.clientX, event.clientY), dragModeRef.current);
   };
 
   const handleAvailabilityPointerEnd = (event) => {
     if (activePointerIdRef.current !== null && event?.pointerId !== undefined && activePointerIdRef.current !== event.pointerId) return;
+
+    const shouldToggleClick = event?.type !== 'pointercancel' && !isDraggingRef.current && pointerStartRef.current?.slotKey && dragModeRef.current;
 
     if (activePointerTargetRef.current && activePointerIdRef.current !== null) {
       try {
@@ -774,10 +845,15 @@ export default function App() {
       }
     }
 
+    if (shouldToggleClick) {
+      paintSlot(pointerStartRef.current.slotKey, dragModeRef.current);
+    }
+
     isDraggingRef.current = false;
     dragModeRef.current = null;
     activePointerIdRef.current = null;
     activePointerTargetRef.current = null;
+    pointerStartRef.current = null;
     lastPaintedSlotRef.current = null;
     setIsDragging(false);
     setDragMode(null);
@@ -814,6 +890,9 @@ export default function App() {
           slotKeys,
         });
         lastSavedAvailabilityRef.current = saveSignature;
+        if (pendingLocalSlotKeysRef.current && saveSignature === `${participantId}:${JSON.stringify(pendingLocalSlotKeysRef.current)}`) {
+          pendingLocalSlotKeysRef.current = null;
+        }
       } catch (error) {
         setParticipantAuthError(error instanceof Error ? error.message : '가능 시간을 저장하지 못했습니다.');
       } finally {
@@ -850,7 +929,7 @@ export default function App() {
     });
 
     const filledCount = Object.keys(nextWaveSlots).length;
-    setAvailability(nextAvailability);
+    setAvailabilitySafely(nextAvailability, { markLocalPending: true });
     setWaveSlots(nextWaveSlots);
     window.setTimeout(() => setWaveSlots({}), 1200);
 
@@ -1427,7 +1506,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                       </div>
                     </div>
                   ) : (
-                  <div className="rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
+                  <div className="calendar-picker-panel rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
                     <div className="flex items-center justify-between mb-4">
                       <button
                         type="button"
@@ -1468,7 +1547,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
 
                         return (
                           <React.Fragment key={formatDateKey(firstDate)}>
-	                            <div className="text-right pr-2 text-sm font-semibold text-[#1d1d1f]">
+	                            <div className="calendar-month-label text-right pr-2 text-sm font-semibold text-[#1d1d1f]">
                               {formatMonthLabel(firstDate, previousDate)}
                             </div>
                             {week.map(date => {
@@ -1480,8 +1559,9 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                                 <button
                                   key={dateKey}
                                   type="button"
+                                  aria-pressed={isSelected}
                                   onClick={() => handleToggleCalendarDate(date)}
-                                  className={`h-10 rounded-[10px] border text-base font-semibold tabular-nums transition-colors
+                                  className={`calendar-date-button h-10 rounded-[10px] border text-base font-semibold tabular-nums transition-colors
                                     ${isSelected
                                       ? 'bg-[#19734d] border-[#19734d] text-white'
                                       : isToday
@@ -1493,7 +1573,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                                 </button>
                               );
                             })}
-	                            <div className="text-left pl-2 text-sm font-semibold text-[#1d1d1f]">
+	                            <div className="calendar-year-label text-left pl-2 text-sm font-semibold text-[#1d1d1f]">
                               {firstDate.getFullYear()}
                             </div>
                           </React.Fragment>
