@@ -1,5 +1,7 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Copy, CheckCircle2, AlertCircle, MessageSquare, Info, MousePointer2, Calendar, Link as LinkIcon, ArrowRight, Wand2, ChevronLeft, ChevronRight, Clock, Users, Slack } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Copy, CheckCircle2, AlertCircle, MessageSquare, Info, MousePointer2, Calendar, Link as LinkIcon, ArrowRight, Wand2, RotateCcw, ChevronLeft, ChevronRight, Clock, Users } from 'lucide-react';
+import { createMeeting as createRemoteMeeting, joinMeeting as joinRemoteMeeting, loadMeeting, saveParticipantAvailability, subscribeToMeeting } from './lib/boardApi';
+import { isSupabaseConfigured } from './lib/supabase';
 
 const buildBoardHours = (start, end) => {
   const hours = [];
@@ -35,9 +37,301 @@ const createDemoAvailability = (dates, start, end) => {
 const SLACK_NOTIFICATION = 'Slack';
 const CREATOR_NOTIFICATION_CHANNELS = [SLACK_NOTIFICATION];
 const NO_CREATOR_NOTIFICATION = '받지 않음';
+const isLocalTestingMode = import.meta.env.DEV && !isSupabaseConfigured;
 const MEETING_TYPES = {
-  FRIENDS: 'friends',
+  REGULAR: 'regular',
   WORK: 'work',
+};
+const WEEKDAY_OPTIONS = [
+  { key: 'mon', label: '월' },
+  { key: 'tue', label: '화' },
+  { key: 'wed', label: '수' },
+  { key: 'thu', label: '목' },
+  { key: 'fri', label: '금' },
+  { key: 'sat', label: '토' },
+  { key: 'sun', label: '일' },
+];
+const WEEKDAY_LABELS = WEEKDAY_OPTIONS.reduce((labels, day) => ({ ...labels, [day.key]: day.label }), {});
+const BOARD_STATE_STORAGE_PREFIX = 'when7meet:board-state:';
+const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+const GOOGLE_IDENTITY_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
+let googleIdentityScriptPromise = null;
+
+const loadGoogleIdentityScript = () => {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('브라우저에서만 Google Calendar를 연결할 수 있습니다.'));
+  }
+
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (googleIdentityScriptPromise) return googleIdentityScriptPromise;
+
+  googleIdentityScriptPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(`script[src="${GOOGLE_IDENTITY_SCRIPT_URL}"]`);
+    const script = existingScript || document.createElement('script');
+
+    const handleLoad = () => {
+      if (window.google?.accounts?.oauth2) {
+        resolve();
+      } else {
+        reject(new Error('Google Identity Services를 불러오지 못했습니다.'));
+      }
+    };
+    const handleError = () => reject(new Error('Google 인증 스크립트를 불러오지 못했습니다.'));
+
+    script.addEventListener('load', handleLoad, { once: true });
+    script.addEventListener('error', handleError, { once: true });
+
+    if (!existingScript) {
+      script.src = GOOGLE_IDENTITY_SCRIPT_URL;
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    }
+  }).catch(error => {
+    googleIdentityScriptPromise = null;
+    throw error;
+  });
+
+  return googleIdentityScriptPromise;
+};
+
+const requestGoogleAccessToken = async () => {
+  const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim();
+
+  if (!clientId) {
+    throw new Error('VITE_GOOGLE_CLIENT_ID가 설정되지 않았습니다. 배포 환경변수에 Google OAuth 웹 클라이언트 ID를 추가해주세요.');
+  }
+
+  await loadGoogleIdentityScript();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('Google 권한 창이 닫혔거나 응답 시간이 초과되었습니다. 다시 시도해주세요.'));
+      }
+    }, 90000);
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      callback(value);
+    };
+
+    try {
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: GOOGLE_CALENDAR_SCOPE,
+        callback: response => {
+          if (!response?.access_token || response.error) {
+            finish(reject, new Error(response?.error_description || 'Google Calendar 권한을 승인하지 않았습니다.'));
+            return;
+          }
+
+          finish(resolve, response.access_token);
+        },
+      });
+
+      tokenClient.requestAccessToken({ prompt: '' });
+    } catch (error) {
+      finish(reject, error instanceof Error ? error : new Error('Google Calendar 권한 요청에 실패했습니다.'));
+    }
+  });
+};
+
+const createLocalDateTime = (dateKey, hour = 0, minute = 0) => {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  if (![year, month, day].every(Number.isFinite)) return null;
+
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const getCalendarDateRange = dates => {
+  const validDates = dates
+    .map(date => createLocalDateTime(date))
+    .filter(Boolean)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  if (validDates.length === 0) {
+    throw new Error('Google Calendar와 비교할 날짜가 없습니다.');
+  }
+
+  const timeMin = validDates[0];
+  const timeMax = new Date(validDates[validDates.length - 1]);
+  timeMax.setDate(timeMax.getDate() + 1);
+
+  return {
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+  };
+};
+
+const fetchGoogleCalendarList = async accessToken => {
+  const calendars = [];
+  let nextPageToken = '';
+
+  do {
+    const query = new URLSearchParams({
+      maxResults: '250',
+      showHidden: 'false',
+    });
+
+    if (nextPageToken) query.set('pageToken', nextPageToken);
+
+    const response = await fetch(`https://www.googleapis.com/calendar/v3/users/me/calendarList?${query.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(result.error?.message || `Google Calendar 목록을 불러오지 못했습니다. (${response.status})`);
+    }
+
+    calendars.push(...(Array.isArray(result.items) ? result.items : []));
+    nextPageToken = result.nextPageToken || '';
+  } while (nextPageToken);
+
+  return calendars
+    .filter(calendar => !calendar.hidden && calendar.accessRole !== 'none')
+    .sort((a, b) => {
+      if (Boolean(a.primary) !== Boolean(b.primary)) return a.primary ? -1 : 1;
+      if (Boolean(a.selected) !== Boolean(b.selected)) return a.selected ? -1 : 1;
+      return (a.summaryOverride || a.summary || '').localeCompare(b.summaryOverride || b.summary || '');
+    });
+};
+
+const fetchGoogleCalendarEvents = async (accessToken, calendarId, dates) => {
+  const { timeMin, timeMax } = getCalendarDateRange(dates);
+  const events = [];
+  let nextPageToken = '';
+
+  do {
+    const query = new URLSearchParams({
+      timeMin,
+      timeMax,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '2500',
+    });
+
+    if (nextPageToken) query.set('pageToken', nextPageToken);
+
+    const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${query.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(result.error?.message || `Google Calendar 일정을 불러오지 못했습니다. (${response.status})`);
+    }
+
+    events.push(...(Array.isArray(result.items) ? result.items : []));
+    nextPageToken = result.nextPageToken || '';
+  } while (nextPageToken);
+
+  return events
+    .filter(event => event.status !== 'cancelled' && event.transparency !== 'transparent')
+    .map(event => {
+      const start = event.start?.dateTime
+        ? new Date(event.start.dateTime)
+        : event.start?.date
+          ? createLocalDateTime(event.start.date)
+          : null;
+      const end = event.end?.dateTime
+        ? new Date(event.end.dateTime)
+        : event.end?.date
+          ? createLocalDateTime(event.end.date)
+          : null;
+
+      if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+      return { start, end };
+    })
+    .filter(Boolean);
+};
+
+const getBoardSlotRange = (date, hour, boardEnd) => {
+  const [hourValue, minuteValue] = hour.split(':').map(Number);
+  const start = createLocalDateTime(date, hourValue, minuteValue);
+  if (!start) return null;
+
+  const durationMinutes = boardEnd === 23 && hourValue === boardEnd && minuteValue === 0 ? 60 : 30;
+  const end = new Date(start);
+  end.setMinutes(end.getMinutes() + durationMinutes);
+  return { start, end };
+};
+
+const isGoogleCalendarSlotAvailable = (events, date, hour, boardEnd) => {
+  const slot = getBoardSlotRange(date, hour, boardEnd);
+  if (!slot) return false;
+
+  return !events.some(event => event.start < slot.end && event.end > slot.start);
+};
+
+const readBoardState = (storageKey) => {
+  try {
+    const storedState = window.localStorage.getItem(storageKey);
+    if (!storedState) return null;
+
+    const parsedState = JSON.parse(storedState);
+    if (!parsedState || typeof parsedState !== 'object') return null;
+
+    return {
+      participants: Array.isArray(parsedState.participants) ? parsedState.participants : [],
+      availability: parsedState.availability && typeof parsedState.availability === 'object' ? parsedState.availability : {},
+      credentials: parsedState.credentials && typeof parsedState.credentials === 'object' ? parsedState.credentials : {},
+    };
+  } catch {
+    return null;
+  }
+};
+
+const AppModal = ({ open, icon: Icon = Info, title, children, actions, onClose, closeOnOverlay = true }) => {
+  useEffect(() => {
+    if (!open || !onClose) return undefined;
+
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') onClose();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#1d1d1f]/15 px-4 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={event => {
+        if (closeOnOverlay && event.target === event.currentTarget) onClose?.();
+      }}
+    >
+      <div
+        className="w-full max-w-sm overflow-hidden rounded-[18px] border border-[#e0e0e0] bg-white shadow-[0_20px_60px_rgba(29,29,31,0.16)]"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title || '알림'}
+        onMouseDown={event => event.stopPropagation()}
+      >
+        {title && (
+          <div className="flex items-center gap-2 border-b border-[#f0f0f0] px-5 py-4">
+            <Icon className="text-[#19734d]" size={20} />
+            <h2 className="font-bold text-[#1d1d1f]">{title}</h2>
+          </div>
+        )}
+        <div className="px-5 py-6">{children}</div>
+        {actions && <div className="flex justify-end gap-2 bg-[#f5f5f7] px-5 py-4">{actions}</div>}
+      </div>
+    </div>
+  );
 };
 
 export default function App() {
@@ -46,7 +340,7 @@ export default function App() {
   const [boardParams, setBoardParams] = useState(null);
 
   // --- 메인 페이지(생성) 폼 상태 ---
-  const [meetingType, setMeetingType] = useState(MEETING_TYPES.FRIENDS);
+  const [meetingType, setMeetingType] = useState(MEETING_TYPES.WORK);
   const [meetingTitle, setMeetingTitle] = useState('');
   const [selectedDates, setSelectedDates] = useState([]);
   const [calendarStartDate, setCalendarStartDate] = useState(() => {
@@ -64,9 +358,20 @@ export default function App() {
 
   // --- 보드(투표) 페이지 상태 ---
   const [currentUser, setCurrentUser] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [participants, setParticipants] = useState([]);
   const [availability, setAvailability] = useState({});
+  const [participantCredentials, setParticipantCredentials] = useState({});
+  const [participantId, setParticipantId] = useState(null);
+  const [participantAuthError, setParticipantAuthError] = useState('');
+  const [boardStorageKey, setBoardStorageKey] = useState(null);
+  const [boardDataSource, setBoardDataSource] = useState('legacy');
+  const [isBoardLoading, setIsBoardLoading] = useState(false);
+  const [boardLoadError, setBoardLoadError] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
+  const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
+  const [isSavingAvailability, setIsSavingAvailability] = useState(false);
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
   const [shareMessage, setShareMessage] = useState('');
   const [waveSlots, setWaveSlots] = useState({});
@@ -81,54 +386,192 @@ export default function App() {
   
   // 구글 캘린더 연동 상태
   const [isGoogleCalendarModalOpen, setIsGoogleCalendarModalOpen] = useState(false);
+  const [isCalendarPickerOpen, setIsCalendarPickerOpen] = useState(false);
+  const [googleCalendars, setGoogleCalendars] = useState([]);
+  const [selectedCalendarIds, setSelectedCalendarIds] = useState([]);
   const [isCalendarAutoFilling, setIsCalendarAutoFilling] = useState(false);
+  const [dialog, setDialog] = useState(null);
+  const lastSavedAvailabilityRef = useRef(null);
+  const googleAccessTokenRef = useRef(null);
+
+  const showAlert = message => {
+    setDialog({ type: 'alert', title: '알림', message });
+  };
+
+  const showConfirm = (message, onConfirm) => {
+    setDialog({ type: 'confirm', title: '확인해주세요', message, onConfirm });
+  };
+
+  const closeDialog = () => setDialog(null);
+
+  const handleDialogConfirm = () => {
+    const onConfirm = dialog?.onConfirm;
+    setDialog(null);
+    onConfirm?.();
+  };
 
   // --- URL Hash 기반 라우팅 ---
   useEffect(() => {
-    const handleHashChange = () => {
+    let isActive = true;
+
+    const resetBoardSession = () => {
+      setParticipants([]);
+      setAvailability({});
+      setParticipantCredentials({});
+      setParticipantId(null);
+      setCurrentUser('');
+      setCurrentPassword('');
+      setParticipantAuthError('');
+      setSelectedResultIndex(0);
+      setShareMessage('');
+      setWaveSlots({});
+      googleAccessTokenRef.current = null;
+      setIsGoogleCalendarModalOpen(false);
+      setIsCalendarPickerOpen(false);
+      setGoogleCalendars([]);
+      setSelectedCalendarIds([]);
+      lastSavedAvailabilityRef.current = null;
+    };
+
+    const handleHashChange = async () => {
       const hash = window.location.hash;
       window.scrollTo(0, 0);
 
-      if (hash.startsWith('#board?')) {
-        const query = hash.replace('#board?', '');
-        const params = new URLSearchParams(query);
-        const parsedExpectedParticipants = parseInt(params.get('expected') || '', 10);
-        const nextBoardParams = {
-          title: params.get('title') || '제목 없음',
-          type: params.get('type') === MEETING_TYPES.WORK ? MEETING_TYPES.WORK : MEETING_TYPES.FRIENDS,
-          dates: (params.get('dates') || '').split(',').filter(Boolean),
-          start: parseInt(params.get('start') || '9', 10),
-          end: parseInt(params.get('end') || '18', 10),
-          expectedParticipants: Number.isFinite(parsedExpectedParticipants) && parsedExpectedParticipants > 0 ? parsedExpectedParticipants : null,
-          notificationChannel: params.get('notify') === SLACK_NOTIFICATION ? SLACK_NOTIFICATION : NO_CREATOR_NOTIFICATION
-        };
-
-        setBoardParams(nextBoardParams);
-        setAppState('board');
-        
-        // 보드 이동 시 초기화
-        if (params.get('demo') === '1') {
-          const demo = createDemoAvailability(nextBoardParams.dates, nextBoardParams.start, nextBoardParams.end);
-          setParticipants(demo.demoParticipants);
-          setAvailability(demo.availability);
-        } else {
-          setParticipants([]);
-          setAvailability({});
-        }
-        setIsJoined(false);
-        setCurrentUser('');
-        setSelectedResultIndex(0);
-        setShareMessage('');
-        setWaveSlots({});
-      } else {
+      if (!hash.startsWith('#board?')) {
         setAppState('home');
+        setBoardParams(null);
+        setBoardStorageKey(null);
+        setBoardDataSource('legacy');
+        setIsBoardLoading(false);
+        setBoardLoadError('');
+        resetBoardSession();
+        return;
       }
+
+      const query = hash.replace('#board?', '');
+      const params = new URLSearchParams(query);
+      const meetingId = params.get('id');
+
+      if (meetingId && !isSupabaseConfigured) {
+        setAppState('board');
+        setBoardParams(null);
+        setBoardStorageKey(null);
+        setBoardDataSource('supabase');
+        setIsBoardLoading(false);
+        setBoardLoadError('이 모임 링크를 열려면 Supabase 환경변수를 먼저 설정해야 합니다.');
+        resetBoardSession();
+        return;
+      }
+
+      if (meetingId) {
+        setAppState('board');
+        setBoardParams(null);
+        setBoardStorageKey(null);
+        setBoardDataSource('supabase');
+        setIsBoardLoading(true);
+        setBoardLoadError('');
+        resetBoardSession();
+
+        try {
+          const remoteBoard = await loadMeeting(meetingId);
+          if (!isActive || window.location.hash !== hash) return;
+
+          setBoardParams(remoteBoard.boardParams);
+          setParticipants(remoteBoard.participants);
+          setAvailability(remoteBoard.availability);
+          setParticipantCredentials({});
+          setIsBoardLoading(false);
+        } catch (error) {
+          if (!isActive || window.location.hash !== hash) return;
+          setIsBoardLoading(false);
+          setBoardLoadError(error instanceof Error ? error.message : '모임 정보를 불러오지 못했습니다.');
+        }
+        return;
+      }
+
+      const parsedExpectedParticipants = parseInt(params.get('expected') || '', 10);
+      const storageKey = `${BOARD_STATE_STORAGE_PREFIX}${window.location.pathname}:${hash}`;
+      const nextBoardParams = {
+        title: params.get('title') || '모임',
+        type: params.get('type') === MEETING_TYPES.REGULAR ? MEETING_TYPES.REGULAR : MEETING_TYPES.WORK,
+        dates: (params.get('dates') || '').split(',').filter(Boolean),
+        start: parseInt(params.get('start') || '9', 10),
+        end: parseInt(params.get('end') || '18', 10),
+        expectedParticipants: Number.isFinite(parsedExpectedParticipants) && parsedExpectedParticipants > 0 ? parsedExpectedParticipants : null,
+        notificationChannel: params.get('notify') === SLACK_NOTIFICATION ? SLACK_NOTIFICATION : NO_CREATOR_NOTIFICATION
+      };
+      const demoBoardState = params.get('demo') === '1'
+        ? (() => {
+            const demo = createDemoAvailability(nextBoardParams.dates, nextBoardParams.start, nextBoardParams.end);
+            return { participants: demo.demoParticipants, availability: demo.availability, credentials: {} };
+          })()
+        : null;
+      const savedBoardState = readBoardState(storageKey);
+      const initialBoardState = savedBoardState || demoBoardState || { participants: [], availability: {}, credentials: {} };
+
+      setBoardParams(nextBoardParams);
+      setAppState('board');
+      setBoardStorageKey(storageKey);
+      setBoardDataSource('legacy');
+      setIsBoardLoading(false);
+      setBoardLoadError('');
+      setParticipants(initialBoardState.participants);
+      setAvailability(initialBoardState.availability);
+      setParticipantCredentials(initialBoardState.credentials);
+      setParticipantId(null);
+      setIsJoined(false);
+      setCurrentUser('');
+      setCurrentPassword('');
+      setParticipantAuthError('');
+      setSelectedResultIndex(0);
+      setShareMessage('');
+      setWaveSlots({});
+      lastSavedAvailabilityRef.current = null;
     };
 
     window.addEventListener('hashchange', handleHashChange);
     handleHashChange(); // 초기 로드
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    return () => {
+      isActive = false;
+      window.removeEventListener('hashchange', handleHashChange);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!boardStorageKey || appState !== 'board' || boardDataSource !== 'legacy') return;
+
+    try {
+      window.localStorage.setItem(boardStorageKey, JSON.stringify({
+        participants,
+        availability,
+        credentials: participantCredentials,
+      }));
+    } catch {
+      // Private browsing or storage limits should not block the voting flow.
+    }
+  }, [appState, availability, boardDataSource, boardStorageKey, participantCredentials, participants]);
+
+  useEffect(() => {
+    if (boardDataSource !== 'supabase' || !boardParams?.id) return undefined;
+    let isActive = true;
+
+    const refreshBoard = async () => {
+      try {
+        const remoteBoard = await loadMeeting(boardParams.id);
+        if (!isActive) return;
+        setParticipants(remoteBoard.participants);
+        setAvailability(remoteBoard.availability);
+      } catch (error) {
+        if (isActive) showToast(error instanceof Error ? error.message : '응답을 새로고침하지 못했습니다.');
+      }
+    };
+
+    const unsubscribe = subscribeToMeeting(boardParams.id, refreshBoard);
+    return () => {
+      isActive = false;
+      unsubscribe();
+    };
+  }, [boardDataSource, boardParams?.id]);
 
   // --- 공통 유틸 ---
   const formatDateKey = (date) => {
@@ -139,10 +582,10 @@ export default function App() {
   };
 
   const formatMonthLabel = (date, previousDate) => {
-    const monthLabel = date.toLocaleString('en-US', { month: 'short' });
+    const monthLabel = `${date.getMonth() + 1}월`;
     if (!previousDate) return monthLabel;
 
-    const previousMonthLabel = previousDate.toLocaleString('en-US', { month: 'short' });
+    const previousMonthLabel = `${previousDate.getMonth() + 1}월`;
     if (previousDate.getMonth() !== date.getMonth()) {
       return `${previousMonthLabel}/${monthLabel}`;
     }
@@ -184,6 +627,16 @@ export default function App() {
     ));
   };
 
+  const handleToggleWeekday = (weekdayKey) => {
+    setSelectedDates(prev => (
+      prev.includes(weekdayKey)
+        ? prev.filter(selectedDate => selectedDate !== weekdayKey)
+        : [...prev, weekdayKey].sort((a, b) => (
+          WEEKDAY_OPTIONS.findIndex(day => day.key === a) - WEEKDAY_OPTIONS.findIndex(day => day.key === b)
+        ))
+    ));
+  };
+
   const moveCalendarByWeeks = (weekOffset) => {
     setCalendarStartDate(prev => {
       const next = new Date(prev);
@@ -210,26 +663,69 @@ export default function App() {
     ));
   }, [calendarStartDate]);
 
-  const handleCreateMeeting = () => {
-    if (selectedDates.length === 0) { alert("날짜를 하루 이상 선택해주세요."); return; }
-    if (parseInt(startHour) >= parseInt(endHour)) { alert("시작 시간이 종료 시간보다 빨라야 합니다."); return; }
-    if (meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled && expectedParticipantCount && parseInt(expectedParticipantCount, 10) < 1) { alert("예상 참여 인원은 1명 이상으로 입력해주세요."); return; }
+  const formatColumnLabel = (value) => WEEKDAY_LABELS[value] || value.split('-').slice(1).join('/');
+
+  const formatResultTime = (date, hour) => {
+    const dayLabel = WEEKDAY_LABELS[date] || date.split('-').slice(1).map(d => parseInt(d, 10)).join('/');
+    return `${dayLabel} ${hour}`;
+  };
+
+  const handleCreateMeeting = async () => {
+    if (selectedDates.length === 0) {
+      showAlert(meetingType === MEETING_TYPES.REGULAR ? '요일을 하나 이상 선택해주세요.' : '날짜를 하루 이상 선택해주세요.');
+      return;
+    }
+    if (parseInt(startHour) >= parseInt(endHour)) {
+      showAlert('시작 시간이 종료 시간보다 빨라야 합니다.');
+      return;
+    }
+    if (isCreatorNotificationEnabled && expectedParticipantCount && parseInt(expectedParticipantCount, 10) < 1) {
+      showAlert('예상 참여 인원은 1명 이상으로 입력해주세요.');
+      return;
+    }
+    if (!isSupabaseConfigured && !isLocalTestingMode) {
+      showAlert('Supabase 환경변수가 설정되지 않았습니다. .env.local 또는 배포 환경변수를 먼저 설정해주세요.');
+      return;
+    }
+
     const safeMeetingTitle = meetingTitle.trim() || '모임';
 
-    const params = new URLSearchParams({
-      title: safeMeetingTitle,
-      type: meetingType,
-      dates: selectedDates.join(','),
-      start: startHour,
-      end: endHour
-    });
+    if (!isSupabaseConfigured) {
+      const localBoardParams = new URLSearchParams({
+        title: safeMeetingTitle,
+        type: meetingType,
+        dates: selectedDates.join(','),
+        start: startHour,
+        end: endHour,
+        notify: isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION,
+      });
 
-    if (meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled && expectedParticipantCount) {
-      params.set('expected', expectedParticipantCount);
+      if (isCreatorNotificationEnabled && expectedParticipantCount) {
+        localBoardParams.set('expected', expectedParticipantCount);
+      }
+
+      window.location.hash = `board?${localBoardParams.toString()}`;
+      return;
     }
-    params.set('notify', meetingType === MEETING_TYPES.WORK && isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION);
-    
-    window.location.hash = `board?${params.toString()}`;
+
+    setIsCreatingMeeting(true);
+    try {
+      const meetingId = await createRemoteMeeting({
+        title: safeMeetingTitle,
+        type: meetingType,
+        dates: selectedDates,
+        start: startHour,
+        end: endHour,
+        expectedParticipants: isCreatorNotificationEnabled && expectedParticipantCount ? Number(expectedParticipantCount) : null,
+        notificationChannel: isCreatorNotificationEnabled ? creatorNotificationPreference : NO_CREATOR_NOTIFICATION,
+      });
+
+      window.location.hash = `board?id=${encodeURIComponent(meetingId)}`;
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : '모임을 만들지 못했습니다.');
+    } finally {
+      setIsCreatingMeeting(false);
+    }
   };
 
   // --- 보드 페이지 로직 ---
@@ -238,14 +734,66 @@ export default function App() {
     return buildBoardHours(boardParams.start, boardParams.end);
   }, [boardParams]);
 
-  const handleJoinBoard = (e) => {
+  const handleJoinBoard = async (e) => {
     e.preventDefault();
-    if (!currentUser.trim()) return;
-    if (!participants.includes(currentUser.trim())) {
-      setParticipants([...participants, currentUser.trim()]);
+    const participantName = currentUser.trim();
+    const temporaryPassword = currentPassword.trim();
+
+    if (!participantName || !temporaryPassword) {
+      setParticipantAuthError('이름과 임시 비밀번호를 입력해주세요.');
+      return;
     }
+
+    if (temporaryPassword.length < 4) {
+      setParticipantAuthError('임시 비밀번호는 4자 이상 입력해주세요.');
+      return;
+    }
+
+    if (boardDataSource === 'supabase') {
+      const isExistingParticipant = participants.some(participant => participant.toLowerCase() === participantName.toLowerCase());
+      setIsJoining(true);
+      setParticipantAuthError('');
+
+      try {
+        const participant = await joinRemoteMeeting({
+          meetingId: boardParams.id,
+          name: participantName,
+          password: temporaryPassword,
+        });
+
+        setParticipantId(participant.id);
+        setCurrentUser(participant.name);
+        setIsJoined(true);
+        if (!isExistingParticipant) setParticipants(prev => [...prev, participant.name]);
+        showToast(isExistingParticipant ? '기존 응답을 불러왔습니다.' : `${participant.name}님으로 참여했습니다.`);
+      } catch (error) {
+        setParticipantAuthError(error instanceof Error ? error.message : '모임 참여에 실패했습니다.');
+      } finally {
+        setIsJoining(false);
+      }
+      return;
+    }
+
+    const isExistingParticipant = participants.includes(participantName);
+    const savedPassword = participantCredentials[participantName];
+
+    if (isExistingParticipant && savedPassword && savedPassword !== temporaryPassword) {
+      setParticipantAuthError('이름 또는 임시 비밀번호가 맞지 않습니다.');
+      return;
+    }
+
+    if (!isExistingParticipant) {
+      setParticipants(prev => [...prev, participantName]);
+    }
+
+    if (!isExistingParticipant || !savedPassword) {
+      setParticipantCredentials(prev => ({ ...prev, [participantName]: temporaryPassword }));
+    }
+
+    setCurrentUser(participantName);
     setIsJoined(true);
-    showToast(boardParams?.type === MEETING_TYPES.FRIENDS ? `${currentUser}님으로 시작했어요.` : `${currentUser}님으로 참여했습니다.`);
+    setParticipantAuthError('');
+    showToast(isExistingParticipant && savedPassword ? '기존 응답을 불러왔습니다.' : `${participantName}님으로 참여했습니다.`);
   };
 
   const updateSlot = (slotKey, forceMode) => {
@@ -272,7 +820,7 @@ export default function App() {
 
   const handleMouseDown = (slotKey) => {
     if (!isJoined) {
-      alert(boardParams?.type === MEETING_TYPES.FRIENDS ? "먼저 닉네임을 입력하고 시작해주세요." : "먼저 이름을 입력하고 참여해주세요.");
+      showAlert('먼저 이름과 임시 비밀번호를 입력하고 참여해주세요.');
       return;
     }
     const hasUser = (availability[slotKey] || []).includes(currentUser);
@@ -280,6 +828,29 @@ export default function App() {
     setIsDragging(true);
     setDragMode(newMode);
     updateSlot(slotKey, newMode);
+  };
+
+  const handleResetCurrentUserAvailability = () => {
+    if (!isJoined) {
+      showAlert('먼저 이름과 임시 비밀번호를 입력하고 참여해주세요.');
+      return;
+    }
+
+    showConfirm('내가 표시한 가능 시간을 모두 초기화할까요?', () => {
+      setAvailability(prev => {
+        const nextAvailability = {};
+
+        Object.entries(prev).forEach(([slotKey, users]) => {
+          const remainingUsers = (Array.isArray(users) ? users : []).filter(user => user !== currentUser);
+          if (remainingUsers.length > 0) nextAvailability[slotKey] = remainingUsers;
+        });
+
+        return nextAvailability;
+      });
+      setWaveSlots({});
+      lastSavedAvailabilityRef.current = null;
+      showToast('내 가능 시간을 초기화했습니다.');
+    });
   };
 
   const handleMouseEnter = (slotKey) => {
@@ -296,14 +867,50 @@ export default function App() {
     return () => window.removeEventListener('mouseup', handleMouseUp);
   }, []);
 
-  const applyCalendarAvailability = (isSlotAvailable) => {
+  useEffect(() => {
+    if (boardDataSource !== 'supabase' || !isJoined || !participantId || !boardParams?.id || !currentPassword) return undefined;
+
+    const slotKeys = Object.entries(availability)
+      .filter(([, users]) => Array.isArray(users) && users.includes(currentUser))
+      .map(([slotKey]) => slotKey)
+      .sort();
+    const saveSignature = `${participantId}:${JSON.stringify(slotKeys)}`;
+
+    if (lastSavedAvailabilityRef.current === saveSignature) return undefined;
+
+    const timer = window.setTimeout(async () => {
+      setIsSavingAvailability(true);
+
+      try {
+        await saveParticipantAvailability({
+          meetingId: boardParams.id,
+          participantId,
+          password: currentPassword,
+          slotKeys,
+        });
+        lastSavedAvailabilityRef.current = saveSignature;
+      } catch (error) {
+        setParticipantAuthError(error instanceof Error ? error.message : '가능 시간을 저장하지 못했습니다.');
+      } finally {
+        setIsSavingAvailability(false);
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [availability, boardDataSource, boardParams?.id, currentPassword, currentUser, isJoined, participantId]);
+
+  const applyCalendarAvailability = (isSlotAvailable, { replaceCurrentUser = false } = {}) => {
     const nextWaveSlots = {};
-    let filledCount = 0;
+    const nextAvailability = {};
 
-    setAvailability(prev => {
-      const nextAvailability = { ...prev };
+    Object.entries(availability).forEach(([slotKey, users]) => {
+      const nextUsers = (Array.isArray(users) ? users : [])
+        .filter(user => !replaceCurrentUser || user !== currentUser);
 
-      boardParams.dates.forEach((date, dateIndex) => {
+      if (nextUsers.length > 0) nextAvailability[slotKey] = nextUsers;
+    });
+
+    boardParams.dates.forEach((date, dateIndex) => {
       boardHours.forEach((hour, hourIndex) => {
         if (isSlotAvailable(date, hour)) {
           const slotKey = `${date}-${hour}`;
@@ -312,30 +919,35 @@ export default function App() {
           if (!currentUsers.includes(currentUser)) {
             nextAvailability[slotKey] = [...currentUsers, currentUser];
             nextWaveSlots[slotKey] = hourIndex + dateIndex * 2;
-            filledCount += 1;
           }
         }
       });
     });
 
-      return nextAvailability;
-    });
-
+    const filledCount = Object.keys(nextWaveSlots).length;
+    setAvailability(nextAvailability);
     setWaveSlots(nextWaveSlots);
     window.setTimeout(() => setWaveSlots({}), 1200);
 
     return filledCount;
   };
 
-  const applyRandomCalendarAvailability = () => {
-    return applyCalendarAvailability(() => Math.random() > 0.42);
-  };
-
-  // --- 구글 캘린더 연동 프로토타입 ---
+  // --- Google Calendar 연동 ---
   const handleSyncGoogleCalendar = () => {
-    if (!isJoined) { alert("먼저 이름을 입력하고 참여해주세요."); return; }
+    if (!isJoined) {
+      showAlert('먼저 이름과 임시 비밀번호를 입력하고 참여해주세요.');
+      return;
+    }
     if (isCalendarAutoFilling) return;
     setIsGoogleCalendarModalOpen(true);
+    loadGoogleIdentityScript().catch(() => {});
+  };
+
+  const closeCalendarPicker = () => {
+    googleAccessTokenRef.current = null;
+    setIsCalendarPickerOpen(false);
+    setGoogleCalendars([]);
+    setSelectedCalendarIds([]);
   };
 
   const handleConfirmGoogleCalendar = async () => {
@@ -345,11 +957,60 @@ export default function App() {
     setIsCalendarAutoFilling(true);
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 450));
-      const filledCount = applyRandomCalendarAvailability();
-      showToast(`구글 캘린더 연동 완료. ${filledCount}개 시간이 채워졌습니다.`);
+      const accessToken = await requestGoogleAccessToken();
+      const calendars = await fetchGoogleCalendarList(accessToken);
+
+      if (calendars.length === 0) {
+        throw new Error('읽을 수 있는 Google Calendar가 없습니다. 계정의 캘린더 공유 권한을 확인해주세요.');
+      }
+
+      googleAccessTokenRef.current = accessToken;
+      const primaryCalendar = calendars.find(calendar => calendar.primary);
+      const selectedCalendars = primaryCalendar
+        ? [primaryCalendar.id]
+        : calendars.filter(calendar => calendar.selected).map(calendar => calendar.id);
+
+      setGoogleCalendars(calendars);
+      setSelectedCalendarIds(selectedCalendars.length > 0 ? selectedCalendars : [calendars[0].id]);
+      setIsGoogleCalendarModalOpen(false);
+      setIsCalendarPickerOpen(true);
     } catch (error) {
-      alert(error.message || '구글 캘린더 연동에 실패했습니다.');
+      showAlert(error instanceof Error ? error.message : 'Google Calendar 연동에 실패했습니다.');
+    } finally {
+      setIsCalendarAutoFilling(false);
+    }
+  };
+
+  const handleApplySelectedCalendars = async () => {
+    if (!boardParams || !googleAccessTokenRef.current) {
+      showAlert('Google Calendar를 다시 연결해주세요.');
+      closeCalendarPicker();
+      return;
+    }
+
+    if (selectedCalendarIds.length === 0) {
+      showAlert('캘린더를 하나 이상 선택해주세요.');
+      return;
+    }
+
+    setIsCalendarAutoFilling(true);
+
+    try {
+      const eventGroups = await Promise.all(
+        selectedCalendarIds.map(calendarId => (
+          fetchGoogleCalendarEvents(googleAccessTokenRef.current, calendarId, boardParams.dates)
+        ))
+      );
+      const events = eventGroups.flat();
+      const filledCount = applyCalendarAvailability(
+        (date, hour) => isGoogleCalendarSlotAvailable(events, date, hour, boardParams.end),
+        { replaceCurrentUser: true }
+      );
+
+      closeCalendarPicker();
+      showToast(`${selectedCalendarIds.length}개 캘린더 기준으로 ${filledCount}개 시간을 채웠습니다.`);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : 'Google Calendar 연동에 실패했습니다.');
     } finally {
       setIsCalendarAutoFilling(false);
     }
@@ -358,10 +1019,10 @@ export default function App() {
   const getHeatmapColor = (count, max) => {
     if (count === 0) return 'bg-white hover:bg-gray-50';
     const ratio = count / max;
-    if (ratio <= 0.25) return 'bg-[#e8f2ff] hover:bg-[#d6eaff] text-[#0066cc]';
-    if (ratio <= 0.5) return 'bg-[#80bfff] hover:bg-[#66b0ff] text-white';
-    if (ratio <= 0.75) return 'bg-[#0071e3] hover:bg-[#0071e3] text-white';
-    return 'bg-[#004f9f] hover:bg-[#0066cc] text-white font-bold';
+    if (ratio <= 0.25) return 'bg-[#eaf1eb] hover:bg-[#d6eadc] text-[#19734d]';
+    if (ratio <= 0.5) return 'bg-[#8fc69e] hover:bg-[#72b886] text-white';
+    if (ratio <= 0.75) return 'bg-[#2b9668] hover:bg-[#2b9668] text-white';
+    return 'bg-[#0d5a3a] hover:bg-[#19734d] text-white font-bold';
   };
 
   const results = useMemo(() => {
@@ -374,10 +1035,8 @@ export default function App() {
         const unavailable = participants.filter(p => !available.includes(p));
         
         if (available.length > 0) {
-          // 간략한 날짜 포맷 (예: 2026-07-15 -> 7/15)
-          const shortDate = date.split('-').slice(1).map(d => parseInt(d, 10)).join('/');
           slotStats.push({
-            date, hour, time: `${shortDate} ${hour}`,
+            date, hour, time: formatResultTime(date, hour),
             availableCount: available.length,
             available, unavailable
           });
@@ -389,17 +1048,17 @@ export default function App() {
 
   // 선택된 결과에 따른 메시지 템플릿
   const generatedMessage = useMemo(() => {
-    if (results.length === 0) return boardParams?.type === MEETING_TYPES.FRIENDS ? "아직 가능한 시간이 없어요." : "입력된 시간이 없습니다.";
+    if (results.length === 0) return boardParams?.type === MEETING_TYPES.REGULAR ? "아직 가능한 시간이 없습니다." : "입력된 시간이 없습니다.";
     const selected = results[selectedResultIndex] || results[0];
 
-    if (boardParams?.type === MEETING_TYPES.FRIENDS) {
-      return `[모임 시간 공유]
-${boardParams?.title || '모임'} 시간은 여기 어때요?
+    if (boardParams?.type === MEETING_TYPES.REGULAR) {
+      return `[정기 모임 시간 공유]
+${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
 
 후보 시간: ${selected.time}
-되는 사람: ${selected.available.join(', ')}
+가능한 사람: ${selected.available.join(', ')}
 
-괜찮으면 이 시간으로 정해요.`;
+괜찮으면 이 시간대로 정해요.`;
     }
     
     return `[약속 시간 공유]
@@ -419,12 +1078,9 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
 
   const handleRequestHomeSlackConnect = () => {
     if (!expectedParticipantCount) {
-      alert('예상 참여 인원 수를 먼저 입력해주세요.');
+      showAlert('예상 참여 인원 수를 먼저 입력해주세요.');
       return;
     }
-
-    const agreed = window.confirm(`입력하신 예상 참여인원 ${expectedParticipantCount}명 만큼 응답을 받은 경우, 설정하신 Slack 채널에 알림이 전송됩니다. 동의하십니까?`);
-    if (!agreed) return;
 
     handleOpenSlackConnectModal('home');
   };
@@ -442,6 +1098,8 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
 
   const boardExpectedParticipantCount = boardParams?.expectedParticipants || null;
   const isWorkMeeting = boardParams?.type === MEETING_TYPES.WORK;
+  const isRegularMeeting = boardParams?.type === MEETING_TYPES.REGULAR;
+  const hasResponseCompletionAlert = boardParams?.notificationChannel === SLACK_NOTIFICATION;
 
   useEffect(() => {
     setShareMessage(generatedMessage);
@@ -452,92 +1110,184 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
       {/* Toast */}
       {toastMessage && (
         <div className="fixed top-5 left-1/2 transform -translate-x-1/2 bg-white text-[#1d1d1f] px-4 py-2 rounded-full border border-[#e0e0e0] z-50 flex items-center gap-2">
-          <CheckCircle2 size={18} className="text-[#0066cc]" />
+          <CheckCircle2 size={18} className="text-[#19734d]" />
           <span className="text-sm font-medium">{toastMessage}</span>
         </div>
       )}
 
-      {isGoogleCalendarModalOpen && (
-        <div className="fixed inset-0 z-50 bg-[#f5f5f7]/80 backdrop-blur-sm flex items-center justify-center px-4">
-          <div className="bg-white w-full max-w-sm rounded-[18px] border border-[#e0e0e0] overflow-hidden">
-            <div className="px-5 py-4 border-b border-[#f0f0f0] flex items-center gap-2">
-              <Calendar className="text-[#0066cc]" size={20} />
-              <h2 className="font-bold text-[#1d1d1f]">Google Calendar</h2>
-            </div>
-            <div className="px-5 py-6">
-              <p className="text-sm text-[#333333] leading-relaxed">
-                현재는 프로토타입이라 실제 계정 권한을 요청하지 않고, 연동에 성공했다고 가정한 뒤 가능한 시간을 자동으로 채웁니다.
-              </p>
-              <div className="mt-4 rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] px-4 py-3 text-sm text-[#333333]">
-                {currentUser}님의 캘린더를 기준으로 임의의 가능한 시간이 물결처럼 채워집니다.
-              </div>
-            </div>
-            <div className="px-5 py-4 bg-[#f5f5f7] flex justify-end gap-2">
+      {dialog && (
+        <AppModal
+          open
+          icon={dialog.type === 'confirm' ? Info : AlertCircle}
+          title={dialog.title}
+          onClose={closeDialog}
+          actions={(
+            <>
+              {dialog.type === 'confirm' && (
+                <button
+                  type="button"
+                  onClick={closeDialog}
+                  className="rounded-full px-4 py-2 text-sm font-medium text-[#333333] transition-colors hover:bg-[#f0f0f0]"
+                >
+                  취소
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setIsGoogleCalendarModalOpen(false)}
-                disabled={isCalendarAutoFilling}
-                className="px-4 py-2 rounded-full text-sm font-medium text-[#333333] hover:bg-[#f0f0f0] transition-colors"
-              >
-                취소
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmGoogleCalendar}
-                disabled={isCalendarAutoFilling}
-                className="px-4 py-2 rounded-full text-sm font-semibold bg-[#0066cc] hover:bg-[#0071e3] text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                연동하고 채우기
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isSlackConnectModalOpen && (
-        <div className="fixed inset-0 z-50 bg-[#f5f5f7]/80 backdrop-blur-sm flex items-center justify-center px-4">
-          <div className="bg-white w-full max-w-sm rounded-[18px] border border-[#e0e0e0] overflow-hidden">
-            <div className="px-5 py-4 border-b border-[#f0f0f0] flex items-center gap-2">
-              <Slack className="text-[#0066cc]" size={20} />
-              <h2 className="font-bold text-[#1d1d1f]">Slack 연결</h2>
-            </div>
-            <div className="px-5 py-6">
-              <p className="text-sm text-[#333333] leading-relaxed">
-                현재는 프로토타입이라 실제 Slack 권한을 요청하지 않고, 확인을 누르면 연동에 성공했다고 가정합니다.
-              </p>
-              <div className="mt-4 rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] px-4 py-3 text-sm text-[#333333]">
-                전원이 응답했을 때 생성자가 Slack으로 알림을 받는 흐름을 검증합니다.
-              </div>
-            </div>
-            <div className="px-5 py-4 bg-[#f5f5f7] flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setIsSlackConnectModalOpen(false)}
-                className="px-4 py-2 rounded-full text-sm font-medium text-[#333333] hover:bg-[#f0f0f0] transition-colors"
-              >
-                취소
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmSlackConnect}
-                className="px-4 py-2 rounded-full text-sm font-semibold bg-[#0066cc] hover:bg-[#0071e3] text-white transition-colors"
+                onClick={dialog.type === 'confirm' ? handleDialogConfirm : closeDialog}
+                className="rounded-full bg-[#19734d] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668]"
               >
                 확인
               </button>
-            </div>
-          </div>
-        </div>
+            </>
+          )}
+        >
+          <p className="whitespace-pre-line text-sm leading-relaxed text-[#333333]">{dialog.message}</p>
+        </AppModal>
       )}
+
+      <AppModal
+        open={isGoogleCalendarModalOpen}
+        icon={Calendar}
+        title="Google Calendar"
+        onClose={() => setIsGoogleCalendarModalOpen(false)}
+        closeOnOverlay={!isCalendarAutoFilling}
+        actions={(
+          <>
+            <button
+              type="button"
+              onClick={() => setIsGoogleCalendarModalOpen(false)}
+              disabled={isCalendarAutoFilling}
+              className="rounded-full px-4 py-2 text-sm font-medium text-[#333333] transition-colors hover:bg-[#f0f0f0] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              취소
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmGoogleCalendar}
+              disabled={isCalendarAutoFilling}
+              className="rounded-full bg-[#19734d] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isCalendarAutoFilling ? '캘린더 확인 중...' : '연동하고 선택하기'}
+            </button>
+          </>
+        )}
+      >
+        <p className="text-sm leading-relaxed text-[#333333]">
+          캘린더 일정이 없는 시간을 내 가능 시간으로 자동 표시합니다.
+        </p>
+        <div className="mt-4 rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] px-4 py-3 text-sm text-[#333333]">
+          Google 계정을 연결하고 캘린더를 선택하면 바로 채워집니다.
+        </div>
+      </AppModal>
+
+      <AppModal
+        open={isCalendarPickerOpen}
+        icon={Calendar}
+        title="캘린더 선택"
+        onClose={closeCalendarPicker}
+        closeOnOverlay={!isCalendarAutoFilling}
+        actions={(
+          <>
+            <button
+              type="button"
+              onClick={closeCalendarPicker}
+              disabled={isCalendarAutoFilling}
+              className="rounded-full px-4 py-2 text-sm font-medium text-[#333333] transition-colors hover:bg-[#f0f0f0] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              취소
+            </button>
+            <button
+              type="button"
+              onClick={handleApplySelectedCalendars}
+              disabled={isCalendarAutoFilling || selectedCalendarIds.length === 0}
+              className="rounded-full bg-[#19734d] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isCalendarAutoFilling ? '일정 확인 중...' : '선택한 캘린더로 채우기'}
+            </button>
+          </>
+        )}
+      >
+        <p className="text-sm leading-relaxed text-[#333333]">
+          어떤 캘린더를 기준으로 가능 시간을 채울까요?
+        </p>
+        <div className="mt-4 max-h-64 space-y-2 overflow-y-auto rounded-[14px] border border-[#e0e0e0] bg-[#f5f5f7] p-2">
+          {googleCalendars.length > 0 ? googleCalendars.map(calendar => {
+            const calendarName = calendar.summaryOverride || calendar.summary || '이름 없는 캘린더';
+            const isSelected = selectedCalendarIds.includes(calendar.id);
+
+            return (
+              <label
+                key={calendar.id}
+                className={`flex cursor-pointer items-center gap-3 rounded-[12px] px-3 py-3 transition-colors ${
+                  isSelected ? 'bg-white' : 'hover:bg-white/70'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => setSelectedCalendarIds(prev => (
+                    prev.includes(calendar.id)
+                      ? prev.filter(id => id !== calendar.id)
+                      : [...prev, calendar.id]
+                  ))}
+                  className="h-4 w-4 accent-[#19734d]"
+                />
+                <span
+                  className="h-3 w-3 shrink-0 rounded-full"
+                  style={{ backgroundColor: calendar.backgroundColor || '#19734d' }}
+                />
+                <span className="min-w-0 flex-1 truncate text-sm text-[#333333]">{calendarName}</span>
+                {calendar.primary && (
+                  <span className="shrink-0 text-[11px] font-semibold text-[#19734d]">기본</span>
+                )}
+              </label>
+            );
+          }) : (
+            <p className="px-3 py-5 text-center text-sm text-[#7a7a7a]">읽을 수 있는 캘린더가 없습니다.</p>
+          )}
+        </div>
+        <p className="mt-3 text-xs leading-relaxed text-[#7a7a7a]">
+          공휴일·생일처럼 일정이 없는 시간도 막을 수 있는 캘린더는 필요할 때만 선택하세요.
+        </p>
+      </AppModal>
+
+      <AppModal
+        open={isSlackConnectModalOpen}
+        onClose={() => setIsSlackConnectModalOpen(false)}
+        actions={(
+          <>
+            <button
+              type="button"
+              onClick={() => setIsSlackConnectModalOpen(false)}
+              className="rounded-full px-4 py-2 text-sm font-medium text-[#333333] transition-colors hover:bg-[#f0f0f0]"
+            >
+              취소
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmSlackConnect}
+              className="rounded-full bg-[#19734d] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668]"
+            >
+              확인
+            </button>
+          </>
+        )}
+      >
+        <p className="text-center text-sm leading-relaxed text-[#333333]">
+          현재 준비 중인 서비스입니다. 😊
+        </p>
+      </AppModal>
 
       {/* Header */}
       <header className="bg-[#f5f5f7]/92 backdrop-blur-xl text-[#1d1d1f] h-16 px-5 sticky top-0 z-50 border-b border-[#e0e0e0] animate-fade-in">
         <div className="max-w-6xl mx-auto h-full flex items-center justify-between">
           <button
             type="button"
-            className="flex items-center gap-2 text-sm font-semibold text-[#1d1d1f] hover:text-[#0071e3] transition-colors"
+            className="flex items-center gap-2 text-sm font-semibold text-[#1d1d1f] hover:text-[#2b9668] transition-colors"
             onClick={() => {window.location.hash = '';}}
           >
-            <span className="w-9 h-9 rounded-full bg-[#0066cc] text-white flex items-center justify-center">
+            <span className="w-9 h-9 rounded-full bg-[#19734d] text-white flex items-center justify-center">
               <Calendar size={17} />
             </span>
             <span className="text-xl font-bold">when7meet</span>
@@ -549,43 +1299,61 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
         <div className="max-w-6xl mx-auto h-14 px-4 flex items-center justify-between">
           <div className="min-w-0">
             <p className="text-sm font-semibold text-[#1d1d1f] truncate">
-              {appState === 'board' && boardParams ? boardParams.title : '약속 시간 맞추기'}
+              {appState === 'board' && boardParams ? boardParams.title : 'when7meet'}
             </p>
             <p className="text-xs text-[#7a7a7a]">
               {appState === 'board' && boardParams
-                ? `${boardParams.dates.length}일 · ${boardParams.start}:00-${boardParams.end}:00`
-                : meetingType === MEETING_TYPES.FRIENDS ? '친구들과 되는 시간을 가볍게 맞춰요' : '가능한 날짜와 시간을 빠르게 정리합니다'}
+                ? `${boardParams.dates.length}${boardParams.type === MEETING_TYPES.REGULAR ? '개 요일' : '일'} · ${boardParams.start}:00-${boardParams.end}:00`
+                : meetingType === MEETING_TYPES.REGULAR ? '요일별 가능한 시간을 빠르게 정리합니다' : '가능한 날짜와 시간을 빠르게 정리합니다'}
             </p>
           </div>
           {appState === 'board' && (
             <button
               onClick={() => copyToClipboard(
                 window.location.href,
-                boardParams?.type === MEETING_TYPES.FRIENDS ? '모임 링크가 복사됐어요.' : '초대 링크가 복사되었습니다.'
+                boardParams?.type === MEETING_TYPES.REGULAR ? '모임 링크가 복사되었습니다.' : '초대 링크가 복사되었습니다.'
               )}
-              className="text-xs sm:text-sm bg-[#0066cc] hover:bg-[#0071e3] text-white px-4 py-2 rounded-full flex items-center gap-1.5 font-semibold transition-colors"
+              className="text-xs sm:text-sm bg-[#19734d] hover:bg-[#2b9668] text-white px-4 py-2 rounded-full flex items-center gap-1.5 font-semibold transition-colors"
             >
-              <LinkIcon size={14}/> {boardParams?.type === MEETING_TYPES.FRIENDS ? '링크 공유' : '초대'}
+              <LinkIcon size={14}/> {boardParams?.type === MEETING_TYPES.REGULAR ? '링크 공유' : '초대'}
             </button>
           )}
         </div>
       </div>
 
       <main>
+        {appState === 'board' && isBoardLoading && !boardParams && (
+          <section className="max-w-3xl mx-auto px-4 py-24 text-center">
+            <div className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-[#333333] border border-[#e0e0e0]">
+              <Calendar size={16} className="text-[#19734d]" />
+              모임 정보를 불러오는 중입니다.
+            </div>
+          </section>
+        )}
+
+        {appState === 'board' && boardLoadError && !boardParams && (
+          <section className="max-w-xl mx-auto px-4 py-24 text-center">
+            <AlertCircle size={32} className="mx-auto mb-3 text-[#19734d]" />
+            <h2 className="text-lg font-semibold text-[#1d1d1f]">모임을 열 수 없습니다.</h2>
+            <p className="mt-2 text-sm leading-relaxed text-[#7a7a7a]">{boardLoadError}</p>
+          </section>
+        )}
         
         {/* =========================================
             메인 페이지 (Home / Create Event) 
             ========================================= */}
         {appState === 'home' && (
           <div className="animate-in fade-in">
-            <section className="relative px-4 pt-12 pb-12 sm:pt-20 sm:pb-16 text-center overflow-hidden">
-              <p className="text-sm font-semibold text-[#0066cc] mb-4 animate-fade-up">when7meet</p>
+            <section className="home-hero relative px-4 pt-12 pb-12 sm:pt-20 sm:pb-16 text-center overflow-hidden">
+              <div className="hero-copy">
+              <p className="hero-kicker text-sm font-semibold text-[#19734d] mb-4 animate-fade-up">when7meet</p>
               <h2 className="mx-auto max-w-4xl text-[clamp(48px,8vw,104px)] font-semibold leading-[0.95] text-[#1d1d1f]">
-                {meetingType === MEETING_TYPES.FRIENDS ? (
+                {meetingType === MEETING_TYPES.REGULAR ? (
                   <>
-                    <span className="inline-block animate-word-pop delay-100">우리</span>{' '}
-                    <span className="inline-block animate-word-pop delay-300">언제</span><br />
-                    <span className="inline-block animate-word-pop delay-500">만날까?</span>
+                    <span className="inline-block animate-word-pop delay-100">정기</span>{' '}
+                    <span className="inline-block animate-word-pop delay-300">모임</span><br />
+                    <span className="inline-block animate-word-pop delay-500">시간을</span>{' '}
+                    <span className="inline-block animate-word-pop delay-700">정해요</span>
                   </>
                 ) : (
                   <>
@@ -596,23 +1364,42 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   </>
                 )}
               </h2>
-              <p className="mx-auto mt-6 max-w-2xl text-base sm:text-xl leading-relaxed text-[#333333] animate-fade-up delay-900">
-                {meetingType === MEETING_TYPES.FRIENDS
-                  ? '날짜 몇 개만 고르고 링크를 보내세요. 친구들이 되는 시간만 칠하면 바로 보기 좋게 정리됩니다.'
+              <p className="hero-description mx-auto mt-6 max-w-2xl text-base sm:text-xl leading-relaxed text-[#333333] animate-fade-up delay-900">
+                {meetingType === MEETING_TYPES.REGULAR
+                  ? '월요일부터 일요일까지 가능한 시간을 모아 고정 모임 시간을 찾습니다.'
                   : '후보 날짜를 고르고, 각자 가능한 시간을 칠한 뒤 응답 현황까지 한 흐름에서 확인합니다.'}
               </p>
+              </div>
+              <div className="hero-preview" aria-hidden="true">
+                <div className="preview-caption">
+                  <strong>이번 주 응답</strong>
+                  <span>겹치는 시간이 보입니다</span>
+                </div>
+                <div className="preview-grid">
+                  {['월', '화', '수', '목', '금', '토', '일'].map(day => (
+                    <span key={day} className="preview-day">{day}</span>
+                  ))}
+                  {Array.from({ length: 21 }).map((_, index) => (
+                    <span key={index} className={`preview-cell ${[1, 2, 4, 5, 8, 9, 10, 13, 15, 16, 19, 20].includes(index) ? 'is-on' : ''}`} />
+                  ))}
+                </div>
+                <div className="preview-footer">
+                  <span className="inline-flex items-center gap-2"><span className="preview-marker" /> 모두의 가능 시간</span>
+                  <span>when7meet</span>
+                </div>
+              </div>
             </section>
 
             <section className="max-w-3xl mx-auto px-4 animate-slide-up delay-300">
             {/* 약속 만들기 */}
             <div className="w-full bg-white p-5 sm:p-8 rounded-[18px] border border-[#e0e0e0]">
               <div className="mb-7">
-                <p className="text-sm font-semibold text-[#1d1d1f] mb-2">{meetingType === MEETING_TYPES.FRIENDS ? '새 모임' : '새 일정'}</p>
+                <p className="text-sm font-semibold text-[#1d1d1f] mb-2">{meetingType === MEETING_TYPES.REGULAR ? '새 정기 모임' : '새 일정'}</p>
                 <h2 className="text-2xl sm:text-3xl font-semibold mb-2 text-[#1d1d1f]">
-                  {meetingType === MEETING_TYPES.FRIENDS ? '친구들이랑 만날 날짜를 골라요' : '가능한 날짜를 먼저 고르세요'}
+                  {meetingType === MEETING_TYPES.REGULAR ? '반복해서 만날 요일을 고르세요' : '가능한 날짜를 먼저 고르세요'}
                 </h2>
                 <p className="text-sm text-[#7a7a7a]">
-                  {meetingType === MEETING_TYPES.FRIENDS ? '후보 날짜와 시간대를 정하면 바로 공유할 수 있는 모임 보드가 만들어집니다.' : '후보 날짜와 시간대를 정하면 바로 투표 보드가 만들어집니다.'}
+                  {meetingType === MEETING_TYPES.REGULAR ? '월~일 중 가능한 요일과 시간대를 정하면 정기 모임 보드가 만들어집니다.' : '후보 날짜와 시간대를 정하면 바로 투표 보드가 만들어집니다.'}
                 </p>
               </div>
               
@@ -621,8 +1408,8 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   <label className="block text-sm font-semibold text-[#333333] mb-2">어떤 약속인가요?</label>
                   <div className="grid grid-cols-2 gap-2 rounded-[18px] bg-[#f5f5f7] p-2 border border-[#e0e0e0]">
                     {[
-                      { type: MEETING_TYPES.FRIENDS, title: '친구 모임', description: '가볍게 공유하고 정하기' },
-                      { type: MEETING_TYPES.WORK, title: '업무 일정', description: '응답 완료 Slack 알림 사용' },
+                      { type: MEETING_TYPES.WORK, title: '업무 일정', description: '특정 날짜와 시간을 정해요' },
+                      { type: MEETING_TYPES.REGULAR, title: '정기 모임', description: '반복할 요일과 시간을 정해요' },
                     ].map(option => {
                       const isSelected = meetingType === option.type;
                       return (
@@ -631,14 +1418,18 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                           type="button"
                           onClick={() => {
                             setMeetingType(option.type);
-                            if (option.type === MEETING_TYPES.FRIENDS) {
-                              setIsCreatorNotificationEnabled(false);
-                              setExpectedParticipantCount('');
-                              setCreatorNotificationPreference(NO_CREATOR_NOTIFICATION);
+                            if (option.type === MEETING_TYPES.REGULAR) {
+                              setSelectedDates(WEEKDAY_OPTIONS.map(day => day.key));
+                              setStartHour('00');
+                              setEndHour('23');
+                            } else {
+                              setSelectedDates([]);
+                              setStartHour('09');
+                              setEndHour('18');
                             }
                           }}
                           className={`rounded-[14px] px-4 py-4 text-left transition-colors ${
-                            isSelected ? 'bg-white text-[#1d1d1f] border border-[#0066cc]' : 'text-[#7a7a7a] hover:bg-white/70 border border-transparent'
+                            isSelected ? 'bg-white text-[#1d1d1f] border border-[#19734d]' : 'text-[#7a7a7a] hover:bg-white/70 border border-transparent'
                           }`}
                         >
                           <span className="block text-sm font-semibold">{option.title}</span>
@@ -650,21 +1441,67 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                 </div>
 
                 <div>
-                  <label className="block text-sm font-semibold text-[#333333] mb-2">{meetingType === MEETING_TYPES.FRIENDS ? '모임 이름' : '일정 이름'}</label>
+                  <label className="block text-sm font-semibold text-[#333333] mb-2">{meetingType === MEETING_TYPES.REGULAR ? '모임 이름' : '일정 이름'}</label>
                   <input 
                     type="text" 
                     value={meetingTitle}
                     onChange={(e) => setMeetingTitle(e.target.value)}
-                    className="w-full border-0 bg-[#f5f5f7] rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
-                    placeholder={meetingType === MEETING_TYPES.FRIENDS ? '예: 성수에서 저녁' : '미입력 시 모임'}
+                    className="w-full border-0 bg-[#f5f5f7] rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#2b9668] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
+                    placeholder={meetingType === MEETING_TYPES.REGULAR ? '예: 스터디 정기 모임' : '예: 팀 회의'}
                   />
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-semibold text-[#333333]">후보 날짜</label>
-                    <span className="text-xs font-semibold text-[#0071e3]">{selectedDates.length}일 선택</span>
+                    <label className="block text-sm font-semibold text-[#333333]">{meetingType === MEETING_TYPES.REGULAR ? '반복 요일' : '후보 날짜'}</label>
+                    <span className="text-xs font-semibold text-[#2b9668]">{selectedDates.length}{meetingType === MEETING_TYPES.REGULAR ? '개 요일' : '일'} 선택</span>
                   </div>
+                  {meetingType === MEETING_TYPES.REGULAR ? (
+                    <div className="rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
+                      <div className="grid grid-cols-7 gap-2">
+                        {WEEKDAY_OPTIONS.map(day => {
+                          const isSelected = selectedDates.includes(day.key);
+                          return (
+                            <button
+                              key={day.key}
+                              type="button"
+                              onClick={() => handleToggleWeekday(day.key)}
+                              className={`h-12 rounded-[12px] border text-base font-semibold transition-colors ${
+                                isSelected
+                                  ? 'bg-[#19734d] border-[#19734d] text-white'
+                                  : 'bg-white border-[#e0e0e0] text-[#1d1d1f] hover:border-[#19734d] hover:bg-[#f5f5f7]'
+                              }`}
+                            >
+                              {day.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDates(WEEKDAY_OPTIONS.map(day => day.key))}
+                          className="rounded-full bg-white px-4 py-2 text-xs font-semibold text-[#333333] border border-[#e0e0e0] hover:bg-[#f0f0f0] transition-colors"
+                        >
+                          월~일 전체
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDates(WEEKDAY_OPTIONS.slice(0, 5).map(day => day.key))}
+                          className="rounded-full bg-white px-4 py-2 text-xs font-semibold text-[#333333] border border-[#e0e0e0] hover:bg-[#f0f0f0] transition-colors"
+                        >
+                          평일만
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDates(WEEKDAY_OPTIONS.slice(5).map(day => day.key))}
+                          className="rounded-full bg-white px-4 py-2 text-xs font-semibold text-[#333333] border border-[#e0e0e0] hover:bg-[#f0f0f0] transition-colors"
+                        >
+                          주말만
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
                     <div className="flex items-center justify-between mb-4">
                       <button
@@ -679,7 +1516,6 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
 	                        <div className="text-lg font-semibold text-[#1d1d1f]">
                           {calendarStartDate.toLocaleString('ko-KR', { year: 'numeric', month: 'long' })}
                         </div>
-                        <div className="text-xs text-[#7a7a7a] mt-0.5">한 번 누르면 선택, 다시 누르면 해제</div>
                       </div>
                       <button
                         type="button"
@@ -693,7 +1529,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
 
                     <div className="grid grid-cols-[52px_repeat(7,minmax(0,1fr))_52px] gap-1 items-center text-center">
                       <div />
-                      {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((dayLabel, index) => (
+                      {['일', '월', '화', '수', '목', '금', '토'].map((dayLabel, index) => (
 	                        <div key={`${dayLabel}-${index}`} className="text-sm font-semibold text-[#333333] py-1">
                           {dayLabel}
                         </div>
@@ -722,10 +1558,10 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                                   onClick={() => handleToggleCalendarDate(date)}
                                   className={`h-10 rounded-[10px] border text-base font-semibold tabular-nums transition-colors
                                     ${isSelected
-                                      ? 'bg-[#0066cc] border-[#0066cc] text-white'
+                                      ? 'bg-[#19734d] border-[#19734d] text-white'
                                       : isToday
-                                        ? 'bg-white border-[#0066cc] text-[#0071e3] hover:bg-[#f5f5f7]'
-                                        : 'bg-white border-[#e0e0e0] text-[#1d1d1f] hover:bg-[#f5f5f7] hover:border-[#0066cc]'
+                                        ? 'bg-white border-[#19734d] text-[#2b9668] hover:bg-[#f5f5f7]'
+                                        : 'bg-white border-[#e0e0e0] text-[#1d1d1f] hover:bg-[#f5f5f7] hover:border-[#19734d]'
                                     }`}
                                 >
                                   {date.getDate()}
@@ -750,6 +1586,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                       </button>
                     </div>
                   </div>
+                  )}
                 </div>
 
                 <div>
@@ -761,19 +1598,19 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
 	                        setStartHour('00');
 	                        setEndHour('23');
 	                      }}
-	                      className="rounded-full bg-[#e8f2ff] px-3 py-1 text-xs font-semibold text-[#0066cc] hover:bg-[#d6eaff] transition-colors"
+	                      className="rounded-full bg-[#eaf1eb] px-3 py-1 text-xs font-semibold text-[#19734d] hover:bg-[#d6eadc] transition-colors"
 	                    >
 	                      전체 시간
 	                    </button>
 	                  </div>
                   <div className="flex items-center gap-3">
-	                    <select value={startHour} onChange={(e) => setStartHour(e.target.value)} className="border-0 bg-[#f5f5f7] rounded-[12px] px-3 py-3 flex-1 focus:ring-2 focus:ring-[#0071e3] outline-none">
+	                    <select value={startHour} onChange={(e) => setStartHour(e.target.value)} className="border-0 bg-[#f5f5f7] rounded-[12px] px-3 py-3 flex-1 focus:ring-2 focus:ring-[#2b9668] outline-none">
                       {Array.from({length: 24}).map((_, i) => (
                         <option key={i} value={i.toString().padStart(2, '0')}>{i.toString().padStart(2, '0')}:00</option>
                       ))}
                     </select>
                     <span className="text-[#7a7a7a] font-bold">~</span>
-	                    <select value={endHour} onChange={(e) => setEndHour(e.target.value)} className="border-0 bg-[#f5f5f7] rounded-[12px] px-3 py-3 flex-1 focus:ring-2 focus:ring-[#0071e3] outline-none">
+	                    <select value={endHour} onChange={(e) => setEndHour(e.target.value)} className="border-0 bg-[#f5f5f7] rounded-[12px] px-3 py-3 flex-1 focus:ring-2 focus:ring-[#2b9668] outline-none">
                        {Array.from({length: 24}).map((_, i) => (
                         <option key={i} value={i.toString().padStart(2, '0')}>{i.toString().padStart(2, '0')}:00</option>
                       ))}
@@ -784,13 +1621,14 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   </p>
                 </div>
 
-                {meetingType === MEETING_TYPES.WORK && (
                 <div className="rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] p-4">
                   <div className="mb-4 flex items-start justify-between gap-4">
                     <div>
                       <label className="block text-sm font-semibold text-[#333333] mb-2">응답 완료 알림</label>
                       <p className="text-xs leading-relaxed text-[#7a7a7a]">
-                        사용할 때만 켜세요. 켜면 예상 참여 인원 기준으로 Slack 알림을 받을 수 있습니다.
+                        {isCreatorNotificationEnabled
+                          ? '예상 참여 인원만큼 모두가 응답하면 Slack으로 알려드려요.'
+                          : '모두가 응답한 뒤 알림을 받아볼까요?'}
                       </p>
                     </div>
                     <button
@@ -807,56 +1645,65 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                       }}
                       className={`shrink-0 rounded-full px-4 py-2 text-xs font-semibold transition-colors ${
                         isCreatorNotificationEnabled
-                          ? 'bg-[#0066cc] text-white'
-                          : 'bg-white text-[#7a7a7a] border border-[#e0e0e0]'
+                          ? 'bg-white text-[#7a7a7a] border border-[#e0e0e0]'
+                          : 'bg-[#19734d] text-white hover:bg-[#2b9668]'
                       }`}
                     >
-                      {isCreatorNotificationEnabled ? '사용 중' : '사용 안 함'}
+                      {isCreatorNotificationEnabled ? '사용 안 함' : '사용하기'}
                     </button>
                   </div>
-                  <div className={`grid grid-cols-1 sm:grid-cols-[1fr_1.5fr] gap-3 ${isCreatorNotificationEnabled ? '' : 'opacity-45'}`}>
-                    <div>
-                      <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">예상 참여 인원</label>
-                      <input
-                        type="number"
-                        min="1"
-                        inputMode="numeric"
-                        disabled={!isCreatorNotificationEnabled}
-                        value={expectedParticipantCount}
-                        onChange={(e) => setExpectedParticipantCount(e.target.value.replace(/[^0-9]/g, ''))}
-                        className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#0071e3] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a] disabled:cursor-not-allowed"
-                        placeholder="예: 5"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">생성자 알림 채널</label>
-                      <div className="grid grid-cols-1 gap-2">
-                        {CREATOR_NOTIFICATION_CHANNELS.map(channel => (
-                          <button
-                            key={channel}
-                            type="button"
-                            disabled={!isCreatorNotificationEnabled}
-                            onClick={handleRequestHomeSlackConnect}
-                            className={`rounded-full px-3 py-3 text-xs font-semibold border transition-colors ${
-                              creatorNotificationPreference === channel
-                                ? 'bg-[#0066cc] border-[#0066cc] text-white'
-                                : 'bg-white border-[#e0e0e0] text-[#333333] hover:border-[#0066cc] disabled:hover:border-[#e0e0e0] disabled:cursor-not-allowed'
-                            }`}
-                          >
-                            Slack 연결하기
-                          </button>
-                        ))}
+                  {isCreatorNotificationEnabled && (
+                    <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.5fr] gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">예상 참여 인원</label>
+                        <input
+                          type="number"
+                          min="1"
+                          inputMode="numeric"
+                          value={expectedParticipantCount}
+                          onChange={(e) => setExpectedParticipantCount(e.target.value.replace(/[^0-9]/g, ''))}
+                          className="w-full border-0 bg-white rounded-[12px] px-4 py-3 focus:ring-2 focus:ring-[#2b9668] outline-none text-[#1d1d1f] placeholder:text-[#7a7a7a]"
+                          placeholder="예: 5"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-[#7a7a7a] mb-1">생성자 알림 채널</label>
+                        <div className="grid grid-cols-1 gap-2">
+                          {CREATOR_NOTIFICATION_CHANNELS.map(channel => (
+                            <button
+                              key={channel}
+                              type="button"
+                              onClick={handleRequestHomeSlackConnect}
+                              className={`rounded-full px-3 py-3 text-xs font-semibold border transition-colors ${
+                                creatorNotificationPreference === channel
+                                  ? 'bg-[#19734d] border-[#19734d] text-white'
+                                  : 'bg-white border-[#e0e0e0] text-[#333333] hover:border-[#19734d]'
+                              }`}
+                            >
+                              Slack 연결하기
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </div>
-                )}
 
+                {isLocalTestingMode ? (
+                  <p className="mt-4 rounded-[12px] bg-[#eef8f1] px-3 py-2 text-xs leading-relaxed text-[#19734d]">
+                    현재 로컬 테스트 모드입니다. 만든 모임과 응답은 이 브라우저에만 저장되며, Supabase를 연결하면 실제 저장 모드로 전환됩니다.
+                  </p>
+                ) : !isSupabaseConfigured && (
+                  <p className="mt-4 rounded-[12px] bg-[#fff8e8] px-3 py-2 text-xs leading-relaxed text-[#8a6418]">
+                    모임을 만들려면 Supabase 환경변수 설정이 필요합니다.
+                  </p>
+                )}
                 <button 
                   onClick={handleCreateMeeting}
-	                  className="w-full mt-4 bg-[#0066cc] hover:bg-[#0071e3] text-white font-semibold text-base py-4 rounded-full flex items-center justify-center gap-2 transition-colors"
+                  disabled={isCreatingMeeting || (!isSupabaseConfigured && !isLocalTestingMode)}
+                  className="w-full mt-4 bg-[#19734d] hover:bg-[#2b9668] text-white font-semibold text-base py-4 rounded-full flex items-center justify-center gap-2 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {meetingType === MEETING_TYPES.FRIENDS ? '모임 보드 만들기' : '보드 생성하기'} <ArrowRight size={20} />
+                  {isCreatingMeeting ? '모임 만드는 중...' : meetingType === MEETING_TYPES.REGULAR ? '정기 모임 보드 만들기' : '보드 생성하기'} <ArrowRight size={20} />
                 </button>
               </div>
             </div>
@@ -880,7 +1727,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   {tooltipData.slotKey}
                 </div>
                 <div className="space-y-1">
-                  <div className="text-xs font-semibold text-[#0071e3] flex justify-between">
+                  <div className="text-xs font-semibold text-[#2b9668] flex justify-between">
                     <span>가능</span>
                     <span>{(availability[tooltipData.slotKey] || []).length}명</span>
                   </div>
@@ -890,7 +1737,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                 </div>
                 <div className="space-y-1 mt-3">
                   <div className="text-xs font-semibold text-[#7a7a7a] flex justify-between">
-                    <span>{isWorkMeeting ? '불가능' : '아직 안 고름'}</span>
+                    <span>{isWorkMeeting ? '불가능' : '미선택'}</span>
                     <span>
                       {participants.filter(p => !(availability[tooltipData.slotKey] || []).includes(p)).length}명
                     </span>
@@ -907,23 +1754,23 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
             <section className="bg-white text-[#1d1d1f] p-6 sm:p-10 rounded-[18px] border border-[#e0e0e0] mb-6">
               <div className="flex flex-col lg:flex-row lg:items-end gap-6 justify-between">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-[#0066cc] mb-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-[#19734d] mb-3">
                     <Calendar size={16} />
                     {isWorkMeeting ? '약속 보드' : '모임 보드'}
                   </div>
                   <h2 className="text-3xl sm:text-5xl font-semibold leading-[0.95] text-[#1d1d1f] truncate">{boardParams.title}</h2>
                   <div className="flex flex-wrap gap-2 mt-5">
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs font-semibold text-[#333333]">
-                      <Calendar size={13} /> {boardParams.dates.length}일
+                      <Calendar size={13} /> {boardParams.dates.length}{isRegularMeeting ? '개 요일' : '일'}
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs font-semibold text-[#333333]">
                       <Clock size={13} /> {boardParams.start}:00-{boardParams.end}:00
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs font-semibold text-[#333333]">
-                      <Users size={13} /> {participants.length}명 {isWorkMeeting ? '참여' : '함께'}
+                      <Users size={13} /> {participants.length}명 참여
                     </span>
-                    {isWorkMeeting && boardExpectedParticipantCount && (
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-[#e8f2ff] px-3 py-1.5 text-xs font-semibold text-[#0066cc]">
+                    {hasResponseCompletionAlert && boardExpectedParticipantCount && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-[#eaf1eb] px-3 py-1.5 text-xs font-semibold text-[#19734d]">
                         예상 {boardExpectedParticipantCount}명
                       </span>
                     )}
@@ -931,25 +1778,48 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                 </div>
 
                 <form onSubmit={handleJoinBoard} className="w-full lg:w-auto">
-                  <div className="rounded-full bg-[#f5f5f7] p-2 flex gap-2 border border-[#e0e0e0]">
+                  <div className="rounded-full bg-[#f5f5f7] p-2 flex flex-wrap sm:flex-nowrap gap-2 border border-[#e0e0e0]">
                     <input
                       type="text"
                       value={currentUser}
-                      onChange={(e) => setCurrentUser(e.target.value)}
-                      disabled={isJoined}
-                      placeholder={isWorkMeeting ? '이름 입력' : '닉네임'}
+                      onChange={(e) => {
+                        setCurrentUser(e.target.value);
+                        setParticipantAuthError('');
+                      }}
+                      disabled={isJoined || isJoining}
+                      placeholder="이름 입력"
+                      autoComplete="username"
                       className="min-w-0 flex-1 lg:w-40 border-0 bg-transparent px-3 py-2 text-sm text-[#1d1d1f] placeholder:text-[#7a7a7a] focus:ring-0 outline-none disabled:text-[#7a7a7a]"
                     />
+                    <input
+                      type="password"
+                      value={currentPassword}
+                      onChange={(e) => {
+                        setCurrentPassword(e.target.value);
+                        setParticipantAuthError('');
+                      }}
+                      disabled={isJoined || isJoining}
+                      placeholder="임시 비밀번호"
+                      autoComplete="new-password"
+                      className="min-w-0 flex-1 lg:w-40 border-0 border-l border-[#e0e0e0] bg-transparent px-3 py-2 text-sm text-[#1d1d1f] placeholder:text-[#7a7a7a] focus:ring-0 outline-none disabled:text-[#7a7a7a]"
+                    />
                     {!isJoined ? (
-                      <button type="submit" className="bg-[#0066cc] hover:bg-[#0071e3] text-white px-4 py-2 rounded-full text-sm font-semibold transition-colors">
-                        {isWorkMeeting ? '참여' : '시작'}
+                      <button type="submit" disabled={isJoining} className="bg-[#19734d] hover:bg-[#2b9668] text-white px-4 py-2 rounded-full text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60">
+                        {isJoining ? '확인 중...' : '참여'}
                       </button>
                     ) : (
-                      <button type="button" onClick={() => { setIsJoined(false); setCurrentUser(''); }} className="bg-white hover:bg-[#f0f0f0] text-[#1d1d1f] px-4 py-2 rounded-full text-sm font-semibold transition-colors">
+                      <button type="button" onClick={() => { setIsJoined(false); setParticipantId(null); setCurrentUser(''); setCurrentPassword(''); lastSavedAvailabilityRef.current = null; }} className="bg-white hover:bg-[#f0f0f0] text-[#1d1d1f] px-4 py-2 rounded-full text-sm font-semibold transition-colors">
                         변경
                       </button>
                     )}
                   </div>
+                  {participantAuthError ? (
+                    <p className="mt-2 text-right text-xs text-red-600">{participantAuthError}</p>
+                  ) : (
+                    <p className="mt-2 text-right text-xs text-[#7a7a7a]">
+                      {isSavingAvailability ? '응답 저장 중...' : '임시 비밀번호로 나중에 응답을 수정할 수 있어요.'}
+                    </p>
+                  )}
                 </form>
               </div>
             </section>
@@ -962,16 +1832,16 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   <div className="absolute inset-0 bg-white/80 backdrop-blur-[1px] z-20 flex flex-col items-center justify-center rounded-[18px]">
                     <AlertCircle className="text-[#7a7a7a] mb-2" size={32} />
                     <p className="text-[#333333] font-semibold">
-                      {isWorkMeeting ? '위쪽에 이름을 입력하고 참여해주세요' : '위쪽에 닉네임을 입력하고 시작해주세요'}
+                      위쪽에 이름과 임시 비밀번호를 입력하고 참여해주세요
                     </p>
                   </div>
                 )}
                 
                 <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '내 가능 시간' : '내가 되는 시간'}</h3>
+                    <h3 className="font-semibold text-[#1d1d1f]">내 가능 시간</h3>
                     <p className="text-xs text-[#7a7a7a] mt-1">
-                      {isWorkMeeting ? '가능한 칸을 눌러 초록색으로 표시하세요.' : '되는 시간만 톡톡 눌러 표시하세요.'}
+                      가능한 칸을 눌러 초록색으로 표시하세요.
                     </p>
                   </div>
                   
@@ -979,18 +1849,27 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   <button 
                     onClick={handleSyncGoogleCalendar}
                     disabled={!isJoined || isCalendarAutoFilling}
-                    className="flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-full bg-[#e8f2ff] text-[#1d1d1f] hover:bg-[#d6eaff] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-full bg-[#eaf1eb] text-[#1d1d1f] hover:bg-[#d6eadc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Wand2 size={14}/>
                     {isCalendarAutoFilling ? '캘린더 확인 중...' : '구글 캘린더 연결'}
                   </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={handleResetCurrentUserAvailability}
+                    disabled={!isJoined || isCalendarAutoFilling || isSavingAvailability}
+                    className="flex items-center justify-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-2 text-xs font-semibold text-[#333333] transition-colors hover:bg-[#e9e9eb] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RotateCcw size={14} />
+                    초기화
+                  </button>
                 </div>
                 <div className="flex items-center justify-between gap-3 mb-3 text-xs text-[#7a7a7a]">
                   <span className="inline-flex items-center gap-1"><MousePointer2 size={12}/> 클릭 또는 드래그</span>
                   <span className="flex items-center gap-3">
-                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#0066cc]" /> {isWorkMeeting ? '가능' : '됨'}</span>
-                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border border-[#e0e0e0]" /> {isWorkMeeting ? '불가능' : '아직'}</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#19734d]" /> 가능</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border border-[#e0e0e0]" /> {isWorkMeeting ? '불가능' : '미선택'}</span>
                   </span>
                 </div>
 
@@ -1001,7 +1880,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                         <th className="p-2 border-b border-r border-[#e0e0e0] w-16 bg-[#f5f5f7]"></th>
                         {boardParams.dates.map(date => (
                           <th key={date} className="p-2 border-b border-[#e0e0e0] font-semibold bg-[#f5f5f7] min-w-[70px] text-[#333333]">
-                            {date.split('-').slice(1).join('/')}
+                            {formatColumnLabel(date)}
                           </th>
                         ))}
                       </tr>
@@ -1009,7 +1888,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                     <tbody onMouseLeave={handleMouseUp}>
                       {boardHours.map(hour => (
                         <tr key={hour}>
-                          <td className="p-1 border-r border-b border-[#e0e0e0] text-xs text-[#7a7a7a] bg-[#f5f5f7] align-top h-7 tabular-nums">
+                          <td className="p-1 border-r border-b border-[#e0e0e0] text-xs text-[#7a7a7a] bg-[#f5f5f7] align-top h-6 tabular-nums">
                             {hour}
                           </td>
                           {boardParams.dates.map(date => {
@@ -1023,7 +1902,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                                 onMouseEnter={() => handleMouseEnter(slotKey)}
                                 style={waveIndex !== undefined ? { '--wave-delay': `${waveIndex * 18}ms` } : undefined}
                                 className={`availability-cell border border-[#e0e0e0] cursor-pointer
-                                  ${isAvailable ? 'is-available bg-[#0066cc] border-[#0071e3]' : 'bg-white hover:bg-[#f0f0f0]'}
+                                  ${isAvailable ? 'is-available bg-[#19734d] border-[#2b9668]' : 'bg-white hover:bg-[#f0f0f0]'}
                                   ${waveIndex !== undefined ? 'wave-fill' : ''}`}
                               ></td>
                             );
@@ -1039,13 +1918,13 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
               <section className="bg-white p-5 sm:p-6 rounded-[18px] border border-[#e0e0e0]">
                 <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-4">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '그룹 전체 시간' : '다 같이 되는 시간'}</h3>
+                    <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '그룹 전체 시간' : '전체 가능 시간'}</h3>
                     <p className="text-xs text-[#7a7a7a] mt-1">
-                      {isWorkMeeting ? '진한 파랑일수록 가능한 사람이 많습니다.' : '진하게 표시될수록 같이 만날 가능성이 높아요.'}
+                      진한 파랑일수록 가능한 사람이 많습니다.
                     </p>
                   </div>
                   <span className="text-xs text-[#7a7a7a] flex items-center gap-1">
-                    <Info size={12}/> {participants.length}명 {isWorkMeeting ? '참여' : '함께'}
+                    <Info size={12}/> {participants.length}명 참여
                   </span>
                 </div>
 
@@ -1056,7 +1935,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                         <th className="p-2 border-b border-r border-[#e0e0e0] w-16 bg-[#f5f5f7]"></th>
                         {boardParams.dates.map(date => (
                           <th key={date} className="p-2 border-b border-[#e0e0e0] font-semibold bg-[#f5f5f7] min-w-[70px] text-[#333333]">
-                            {date.split('-').slice(1).join('/')}
+                            {formatColumnLabel(date)}
                           </th>
                         ))}
                       </tr>
@@ -1064,7 +1943,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                     <tbody>
                       {boardHours.map(hour => (
                         <tr key={hour}>
-                          <td className="p-1 border-r border-b border-[#e0e0e0] text-xs text-[#7a7a7a] bg-[#f5f5f7] align-top h-7 tabular-nums">
+                          <td className="p-1 border-r border-b border-[#e0e0e0] text-xs text-[#7a7a7a] bg-[#f5f5f7] align-top h-6 tabular-nums">
                             {hour}
                           </td>
                           {boardParams.dates.map(date => {
@@ -1103,16 +1982,16 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
             {/* 결과 요약 및 공유 */}
             <section className="bg-white p-5 sm:p-6 rounded-[18px] border border-[#e0e0e0]">
 	               <div className="flex items-center gap-2 mb-6">
-	                  <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '결과 요약' : '언제 만날까요?'}</h3>
+	                  <h3 className="font-semibold text-[#1d1d1f]">{isWorkMeeting ? '결과 요약' : '정기 모임 시간 후보'}</h3>
                 </div>
                 
                 <div className={`grid grid-cols-1 ${isWorkMeeting ? 'md:grid-cols-2' : 'lg:grid-cols-[0.9fr_1.1fr]'} gap-8`}>
                   {/* Top 결과 카드 */}
                   <div>
-	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3">{isWorkMeeting ? '가장 많이 겹친 시간' : '많이 되는 시간'}</h4>
+	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3">{isWorkMeeting ? '가장 많이 겹친 시간' : '가장 많이 가능한 시간'}</h4>
                     {results.length === 0 ? (
 	                      <div className="text-sm text-[#7a7a7a] bg-[#f5f5f7] p-5 rounded-[18px] border border-[#f0f0f0] text-center py-8">
-                        {isWorkMeeting ? '아직 선택된 가능 시간이 없습니다.' : '아직 친구들이 고른 시간이 없어요.'}
+                        {isWorkMeeting ? '아직 선택된 가능 시간이 없습니다.' : '아직 선택된 가능 시간이 없습니다.'}
                       </div>
                     ) : (
                       <div className="space-y-3">
@@ -1122,15 +2001,15 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                             <div 
                               key={idx} 
                               onClick={() => setSelectedResultIndex(idx)}
-	                              className={`p-4 rounded-[18px] border flex items-center justify-between cursor-pointer transition-all
-	                                ${isSelected ? 'border-[#0066cc] bg-[#e8f2ff]' : 'border-[#f0f0f0] bg-white hover:border-[#0066cc] hover:bg-[#f5f5f7]'}`}
+                              className={`p-4 rounded-[18px] border flex items-center justify-between cursor-pointer transition-all
+	                                ${isSelected ? 'border-[#19734d] bg-[#eaf1eb]' : 'border-[#f0f0f0] bg-white hover:border-[#19734d] hover:bg-[#f5f5f7]'}`}
                             >
                               <div>
-	                                {idx === 0 && <span className="text-xs font-semibold text-[#0071e3] bg-white px-2 py-0.5 rounded-full mb-1 inline-block">추천</span>}
+	                                {idx === 0 && <span className="text-xs font-semibold text-[#2b9668] bg-white px-2 py-0.5 rounded-full mb-1 inline-block">추천</span>}
 	                                {idx !== 0 && isSelected && <span className="text-xs font-semibold text-[#333333] bg-white px-2 py-0.5 rounded-full mb-1 inline-block">선택됨</span>}
-	                                <div className={`font-semibold ${isSelected ? 'text-[#0071e3] text-lg' : 'text-[#1d1d1f]'}`}>{res.time}</div>
+	                                <div className={`font-semibold ${isSelected ? 'text-[#2b9668] text-lg' : 'text-[#1d1d1f]'}`}>{res.time}</div>
                                 <div className="text-xs text-[#7a7a7a] mt-1">
-                                  {isWorkMeeting ? '가능' : '되는 사람'}: {res.available.join(', ')}
+                                  가능: {res.available.join(', ')}
                                   {isWorkMeeting && (
                                     <>
                                       <br/>
@@ -1141,16 +2020,16 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                               </div>
 	                              <div className={`text-center rounded-[14px] px-3 py-2 ${isSelected ? 'bg-white' : 'bg-[#f5f5f7]'}`}>
                                 <div className="text-xs text-[#7a7a7a]">{isWorkMeeting ? '참석' : '가능'}</div>
-	                                <div className={`font-semibold ${isSelected ? 'text-[#0071e3]' : 'text-[#333333]'}`}>{res.availableCount}명</div>
+	                                <div className={`font-semibold ${isSelected ? 'text-[#2b9668]' : 'text-[#333333]'}`}>{res.availableCount}명</div>
                                   <button
                                     type="button"
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       setSelectedResultIndex(idx);
-                                      showToast(isWorkMeeting ? '선택한 시간으로 공유 메시지를 만들었습니다.' : '이 시간으로 정했어요. 공유 메시지를 복사해보세요.');
+                                      showToast(isWorkMeeting ? '선택한 시간으로 공유 메시지를 만들었습니다.' : '선택한 시간대로 공유 메시지를 만들었습니다.');
                                     }}
                                     className={`mt-2 rounded-full px-3 py-1 text-[11px] font-semibold transition-colors ${
-                                      isSelected ? 'bg-[#0066cc] text-white' : 'bg-white text-[#0066cc] hover:bg-[#e8f2ff]'
+                                      isSelected ? 'bg-[#19734d] text-white' : 'bg-white text-[#19734d] hover:bg-[#eaf1eb]'
                                     }`}
                                   >
                                     이 시간으로 정하기
@@ -1166,24 +2045,24 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
                   {/* 공유 텍스트 */}
                   <div className="flex flex-col h-full">
 	                    <h4 className="text-sm font-semibold text-[#7a7a7a] mb-3 flex items-center gap-1">
-                      <MessageSquare size={14}/> {isWorkMeeting ? '공유 메시지' : '친구들에게 보낼 메시지'}
+                      <MessageSquare size={14}/> {isWorkMeeting ? '공유 메시지' : '모임원에게 보낼 메시지'}
                     </h4>
                     {!isWorkMeeting && (
                       <p className="mb-3 text-sm text-[#7a7a7a]">
-                        선택한 시간을 기준으로 바로 복사해서 카톡이나 DM에 붙여 넣으면 됩니다.
+                        선택한 시간대를 기준으로 바로 복사해서 공유할 수 있습니다.
                       </p>
                     )}
                     <textarea 
                       value={shareMessage}
                       onChange={(e) => setShareMessage(e.target.value)}
-	                      className="w-full flex-1 border-0 rounded-[18px] p-4 text-sm text-[#333333] bg-[#f5f5f7] focus:outline-none focus:ring-2 focus:ring-[#0071e3] resize-none min-h-[160px] font-mono"
+	                      className="w-full flex-1 border-0 rounded-[18px] p-4 text-sm text-[#333333] bg-[#f5f5f7] focus:outline-none focus:ring-2 focus:ring-[#2b9668] resize-none min-h-[160px] font-mono"
                     />
                     <button 
                       onClick={() => copyToClipboard(
                         shareMessage,
-                        isWorkMeeting ? '공유 메시지가 복사되었습니다.' : '친구들에게 보낼 메시지가 복사됐어요.'
+                        isWorkMeeting ? '공유 메시지가 복사되었습니다.' : '모임원에게 보낼 메시지가 복사되었습니다.'
                       )}
-	                      className="mt-4 w-full bg-[#0066cc] hover:bg-[#0071e3] text-white font-semibold py-3 rounded-full flex items-center justify-center gap-2 transition-colors"
+	                      className="mt-4 w-full bg-[#19734d] hover:bg-[#2b9668] text-white font-semibold py-3 rounded-full flex items-center justify-center gap-2 transition-colors"
                     >
                       <Copy size={16} />
                       {isWorkMeeting ? '공유 메시지 복사' : '메시지 복사하기'}
@@ -1232,7 +2111,7 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
         }
         .availability-cell {
           position: relative;
-          height: 28px;
+          height: 24px;
           transform: translateZ(0);
           transition:
             background-color 220ms cubic-bezier(0.2, 0, 0, 1),
@@ -1283,12 +2162,12 @@ ${boardParams?.title || '모임'} 시간은 여기 어때요?
           0% {
             transform: scale(0.92);
             filter: saturate(0.75);
-            box-shadow: inset 0 0 0 1px rgba(0, 102, 204, 0);
+            box-shadow: inset 0 0 0 1px rgba(25, 115, 77, 0);
           }
           45% {
             transform: scale(1.045);
             filter: saturate(1.2);
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.38), 0 0 0 3px rgba(0, 102, 204, 0.12);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.38), 0 0 0 3px rgba(25, 115, 77, 0.12);
           }
           100% {
             transform: scale(1);
