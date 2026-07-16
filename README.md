@@ -32,7 +32,7 @@
 <p align="center">
   <a href="https://youtu.be/1qovuK9oxdU">
     <img
-      src="https://img.youtube.com/vi/1qovuK9oxdU/hqdefault.jpg"
+      src="docs/images/youtube-thumbnail.png"
       alt="when7meet 서비스 소개 영상"
       width="720"
     />
