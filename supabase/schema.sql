@@ -10,7 +10,7 @@ create table if not exists public.meetings (
   expected_participants smallint check (expected_participants is null or expected_participants > 0),
   notification_channel text not null default '받지 않음',
   created_at timestamptz not null default now(),
-  constraint meetings_valid_hours check (start_hour < end_hour)
+  constraint meetings_valid_hours check (start_hour <= end_hour)
 );
 
 create table if not exists public.participants (

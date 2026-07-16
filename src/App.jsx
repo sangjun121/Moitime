@@ -676,8 +676,8 @@ export default function App() {
       showAlert(meetingType === MEETING_TYPES.REGULAR ? '요일을 하나 이상 선택해주세요.' : '날짜를 하루 이상 선택해주세요.');
       return;
     }
-    if (parseInt(startHour) >= parseInt(endHour)) {
-      showAlert('시작 시간이 종료 시간보다 빨라야 합니다.');
+    if (parseInt(startHour) > parseInt(endHour)) {
+      showAlert('시작 시간은 종료 시간보다 늦을 수 없습니다.');
       return;
     }
     if (isCreatorNotificationEnabled && expectedParticipantCount && parseInt(expectedParticipantCount, 10) < 1) {
@@ -1724,7 +1724,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                     </select>
                   </div>
                   <p className="mt-2 text-xs text-[#7a7a7a]">
-                    종료 시간이 23시이면 마지막 슬롯은 23:00부터 24:00까지 포함됩니다.
+                    시작 시간과 종료 시간이 같으면 해당 시간대 1칸만 투표합니다. 종료 시간이 23시이면 23:00부터 24:00까지 포함됩니다.
                   </p>
                 </div>
 
