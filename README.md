@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://sangjun121.github.io/when-7-meet/"><strong>서비스 바로가기</strong></a>
+  <a href="https://moitime.co.kr/"><strong>서비스 바로가기</strong></a>
   ·
   <a href="https://github.com/sangjun121/when-7-meet/issues">버그 제보</a>
   ·
