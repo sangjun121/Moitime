@@ -18,6 +18,7 @@ const CREATOR_NOTIFICATION_CHANNELS = [SLACK_NOTIFICATION];
 const NO_CREATOR_NOTIFICATION = '받지 않음';
 const DRAG_START_THRESHOLD = 6;
 const AVAILABILITY_SAVE_DELAY = 100;
+const LUNCH_TIME_SLOTS = new Set(['11:30', '12:00', '12:30']);
 const MEETING_TYPES = {
   REGULAR: 'regular',
   WORK: 'work',
@@ -738,6 +739,8 @@ export default function App() {
     return buildBoardHours(boardParams.start, boardParams.end);
   }, [boardParams]);
 
+  const hasLunchTimeSlots = boardHours.some(hour => LUNCH_TIME_SLOTS.has(hour));
+
   const handleJoinBoard = async (e) => {
     e.preventDefault();
     const participantName = currentUser.trim();
@@ -992,6 +995,47 @@ export default function App() {
       lastSavedAvailabilityRef.current = null;
       showToast('내 가능 시간을 초기화했습니다.');
     });
+  };
+
+  const handleExcludeLunchTime = () => {
+    if (!hasActiveParticipantSession) {
+      showAlert('먼저 이름과 임시 비밀번호를 입력하고 참여해주세요.');
+      return;
+    }
+
+    const lunchHours = boardHours.filter(hour => LUNCH_TIME_SLOTS.has(hour));
+    if (lunchHours.length === 0) {
+      showToast('현재 시간대에는 점심시간 슬롯이 없습니다.');
+      return;
+    }
+
+    setAvailability(prev => {
+      const nextAvailability = { ...prev };
+
+      boardParams.dates.forEach(date => {
+        lunchHours.forEach(hour => {
+          const slotKey = `${date}-${hour}`;
+          const remainingUsers = (nextAvailability[slotKey] || []).filter(user => user !== currentUser);
+          if (remainingUsers.length > 0) nextAvailability[slotKey] = remainingUsers;
+          else delete nextAvailability[slotKey];
+        });
+      });
+
+      availabilityRef.current = nextAvailability;
+      pendingLocalSlotKeysRef.current = getCurrentUserSlotKeys(nextAvailability);
+      return nextAvailability;
+    });
+
+    setWaveSlots(prev => {
+      const nextWaveSlots = { ...prev };
+      boardParams.dates.forEach(date => {
+        lunchHours.forEach(hour => {
+          delete nextWaveSlots[`${date}-${hour}`];
+        });
+      });
+      return nextWaveSlots;
+    });
+    showToast('점심시간을 제외했습니다.');
   };
 
   const handleAvailabilityPointerMove = (event) => {
@@ -2096,33 +2140,54 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                   </div>
                 )}
                 
-                <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+                <div className="flex flex-col gap-3 mb-4 sm:flex-row sm:items-start">
                   <div className="flex-1">
                     <h3 className="font-semibold text-[#1d1d1f]">내 가능 시간</h3>
                     <p className="text-xs text-[#7a7a7a] mt-1">
                       가능한 칸을 눌러 초록색으로 표시하세요.
                     </p>
                   </div>
-                  
-                  {isWorkMeeting && (
-                  <button 
-                    onClick={handleSyncGoogleCalendar}
-                    disabled={!hasActiveParticipantSession || isCalendarAutoFilling}
-                    className="w-full sm:w-auto flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-full bg-[#eaf1eb] text-[#1d1d1f] hover:bg-[#d6eadc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Wand2 size={14}/>
-                    {isCalendarAutoFilling ? '캘린더 확인 중...' : '구글 캘린더 연결'}
-                  </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleResetCurrentUserAvailability}
-                    disabled={!hasActiveParticipantSession || isCalendarAutoFilling || isSavingAvailability}
-                    className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-2 text-xs font-semibold text-[#333333] transition-colors hover:bg-[#e9e9eb] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <RotateCcw size={14} />
-                    초기화
-                  </button>
+                  <div className="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
+                    <div className="relative w-full max-w-[300px] rounded-[14px] border border-[#b9dfc5] bg-[#f2f8f3] px-3 py-2.5 text-xs leading-relaxed text-[#397154] shadow-sm">
+                      <span className="mb-1 inline-flex rounded-full bg-[#d6eadc] px-2 py-0.5 font-semibold text-[#19734d]">
+                        새로운 기능 구경하기
+                      </span>
+                      <p>이제 우테코 점심시간을 간편하게 제외할 수 있어요!</p>
+                      <span className="absolute -bottom-1.5 right-6 h-3 w-3 rotate-45 border-b border-r border-[#b9dfc5] bg-[#f2f8f3]" aria-hidden="true" />
+                    </div>
+                    <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                      {isWorkMeeting && (
+                        <button
+                          type="button"
+                          onClick={handleSyncGoogleCalendar}
+                          disabled={!hasActiveParticipantSession || isCalendarAutoFilling}
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-full bg-[#eaf1eb] text-[#1d1d1f] hover:bg-[#d6eadc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Wand2 size={14}/>
+                          {isCalendarAutoFilling ? '캘린더 확인 중...' : '구글 캘린더 연결'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleExcludeLunchTime}
+                        disabled={!hasActiveParticipantSession || isCalendarAutoFilling || isSavingAvailability || !hasLunchTimeSlots}
+                        title={hasLunchTimeSlots ? '11시 30분부터 13시까지의 점심시간을 제외합니다.' : '현재 시간대에 점심시간 슬롯이 없습니다.'}
+                        className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-full bg-[#eaf1eb] px-3 py-2 text-xs font-semibold text-[#19734d] transition-colors hover:bg-[#d6eadc] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Clock size={14} />
+                        점심시간 제외하기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleResetCurrentUserAvailability}
+                        disabled={!hasActiveParticipantSession || isCalendarAutoFilling || isSavingAvailability}
+                        className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-2 text-xs font-semibold text-[#333333] transition-colors hover:bg-[#e9e9eb] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RotateCcw size={14} />
+                        초기화
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-3 text-xs text-[#7a7a7a]">
                   <span className="inline-flex items-center gap-1"><MousePointer2 size={12}/> 칸 또는 날짜 클릭/드래그</span>
