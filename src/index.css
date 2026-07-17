@@ -123,6 +123,52 @@
   touch-action: auto;
 }
 
+.lunch-feature-control {
+  position: relative;
+  display: flex;
+  width: auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 68px;
+}
+
+.lunch-feature-callout {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 30;
+  width: min(230px, calc(100vw - 32px));
+  box-sizing: border-box;
+  transform: translateX(-50%);
+  border: 1px solid #b9dfc5;
+  border-radius: 14px;
+  background: #f2f8f3;
+  padding: 10px 12px;
+  color: #397154;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+  box-shadow: 0 3px 8px rgba(25, 115, 77, 0.08);
+}
+
+.lunch-feature-callout p {
+  margin: 0;
+  overflow-wrap: keep-all;
+}
+
+.lunch-feature-callout-arrow {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateX(-50%) rotate(45deg);
+  border-right: 1px solid #b9dfc5;
+  border-bottom: 1px solid #b9dfc5;
+  background: #f2f8f3;
+}
+
 .calendar-picker-panel {
   overflow: hidden;
 }
@@ -227,5 +273,13 @@
 
   .modal-actions > button {
     width: 100%;
+  }
+
+  .lunch-feature-control {
+    width: 100%;
+  }
+
+  .lunch-feature-callout {
+    width: min(230px, calc(100vw - 28px));
   }
 }

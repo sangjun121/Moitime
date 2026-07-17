@@ -63,6 +63,12 @@ const parseBoardPath = pathname => {
   return SHARE_CODE_PATTERN.test(shareCode) ? shareCode : null;
 };
 
+const parseBoardSearch = search => {
+  const params = new URLSearchParams(search);
+  const shareCode = params.get('code')?.trim();
+  return shareCode ? { type: 'shareCode', value: shareCode } : null;
+};
+
 const getAppBaseUrl = () => `${window.location.origin}${getAppBasePath(window.location.pathname)}`;
 
 const getBoardShareUrl = boardParams => {
@@ -71,7 +77,8 @@ const getBoardShareUrl = boardParams => {
     return `${baseUrl}#board?id=${encodeURIComponent(boardParams?.id || '')}`;
   }
 
-  return `${baseUrl}${encodeURIComponent(boardParams.shareCode)}`;
+  // GitHub Pages returns 404 for clean subpaths, so query URLs keep Kakao's crawler on a 200 response.
+  return `${baseUrl}?code=${encodeURIComponent(boardParams.shareCode)}`;
 };
 
 let googleIdentityScriptPromise = null;
@@ -538,7 +545,7 @@ export default function App() {
       const pathShareCode = parseBoardPath(pathname);
       const boardRoute = pathShareCode
         ? { type: 'shareCode', value: pathShareCode }
-        : parseBoardHash(hash);
+        : parseBoardSearch(window.location.search) || parseBoardHash(hash);
       window.scrollTo(0, 0);
 
       const isBoardHash = hash.startsWith('#board?');
@@ -2247,13 +2254,13 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                           {isCalendarAutoFilling ? '캘린더 확인 중...' : '구글 캘린더 연결'}
                         </button>
                       )}
-                      <div className="relative flex w-full flex-col gap-2 sm:w-auto sm:pt-[68px]">
-                        <div className="relative w-full max-w-[300px] rounded-[14px] border border-[#b9dfc5] bg-[#f2f8f3] px-3 py-2.5 text-xs leading-relaxed text-[#397154] shadow-sm sm:absolute sm:left-1/2 sm:top-0 sm:w-[300px] sm:-translate-x-1/2">
+                      <div className="lunch-feature-control">
+                        <div className="lunch-feature-callout" role="note">
                           <span className="mb-1 inline-flex rounded-full bg-[#d6eadc] px-2 py-0.5 font-semibold text-[#19734d]">
                             새로운 기능 구경하기
                           </span>
                           <p>이제 우테코 점심시간을 간편하게 제외할 수 있어요!</p>
-                          <span className="absolute -bottom-1.5 left-1/2 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-[#b9dfc5] bg-[#f2f8f3]" aria-hidden="true" />
+                          <span className="lunch-feature-callout-arrow" aria-hidden="true" />
                         </div>
                         <button
                           type="button"
