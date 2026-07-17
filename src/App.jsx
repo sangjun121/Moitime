@@ -1727,7 +1727,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                     <span className="inline-block animate-word-pop delay-100">시간</span>{' '}
                     <span className="inline-block animate-word-pop delay-300">맞추기,</span><br />
                     <span className="inline-block animate-word-pop delay-500">링크</span>{' '}
-                    <span className="inline-block animate-word-pop delay-700">하나로 끝내요</span>
+                    <span className="inline-block animate-word-pop delay-700">하나로 끝내세요</span>
                   </>
                 )}
               </h2>
