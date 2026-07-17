@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Copy, CheckCircle2, AlertCircle, MessageSquare, Info, MousePointer2, Calendar, Link as LinkIcon, ArrowRight, Wand2, RotateCcw, ChevronLeft, ChevronRight, Clock, Users } from 'lucide-react';
-import { createMeeting as createRemoteMeeting, getMeetingCount, joinMeeting as joinRemoteMeeting, loadMeeting, saveParticipantAvailability, subscribeToMeeting } from './lib/boardApi';
+import { createMeeting as createRemoteMeeting, getMeetingCount, joinMeeting as joinRemoteMeeting, loadMeeting, loadMeetingByShareCode, saveParticipantAvailability, subscribeToMeeting } from './lib/boardApi';
 import { isSupabaseConfigured } from './lib/supabase';
 
 const buildBoardHours = (start, end) => {
@@ -35,6 +35,45 @@ const WEEKDAY_OPTIONS = [
 const WEEKDAY_LABELS = WEEKDAY_OPTIONS.reduce((labels, day) => ({ ...labels, [day.key]: day.label }), {});
 const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 const GOOGLE_IDENTITY_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
+// New codes are 8-character Base64URL tokens; keep 10-character hex support for an older migration.
+const SHARE_CODE_PATTERN = /^(?:[A-Za-z0-9_-]{8}|[a-f0-9]{10})$/;
+
+const parseBoardHash = hash => {
+  if (!hash.startsWith('#board?')) return null;
+
+  const params = new URLSearchParams(hash.slice('#board?'.length));
+  const meetingId = params.get('id')?.trim();
+  if (meetingId) return { type: 'id', value: meetingId };
+
+  const shareCode = params.get('code')?.trim();
+  return shareCode ? { type: 'shareCode', value: shareCode } : null;
+};
+
+const getAppBasePath = pathname => {
+  const segments = pathname.split('/').filter(Boolean);
+  const lastSegment = segments[segments.length - 1];
+
+  if (SHARE_CODE_PATTERN.test(lastSegment || '')) segments.pop();
+  return segments.length > 0 ? `/${segments.join('/')}/` : '/';
+};
+
+const parseBoardPath = pathname => {
+  const segments = pathname.split('/').filter(Boolean);
+  const shareCode = segments[segments.length - 1] || '';
+  return SHARE_CODE_PATTERN.test(shareCode) ? shareCode : null;
+};
+
+const getAppBaseUrl = () => `${window.location.origin}${getAppBasePath(window.location.pathname)}`;
+
+const getBoardShareUrl = boardParams => {
+  const baseUrl = getAppBaseUrl();
+  if (!boardParams?.shareCode) {
+    return `${baseUrl}#board?id=${encodeURIComponent(boardParams?.id || '')}`;
+  }
+
+  return `${baseUrl}${encodeURIComponent(boardParams.shareCode)}`;
+};
+
 let googleIdentityScriptPromise = null;
 
 const loadGoogleIdentityScript = () => {
@@ -491,9 +530,15 @@ export default function App() {
 
     const handleHashChange = async () => {
       const hash = window.location.hash;
+      const pathname = window.location.pathname;
+      const pathShareCode = parseBoardPath(pathname);
+      const boardRoute = pathShareCode
+        ? { type: 'shareCode', value: pathShareCode }
+        : parseBoardHash(hash);
       window.scrollTo(0, 0);
 
-      if (!hash.startsWith('#board?')) {
+      const isBoardHash = hash.startsWith('#board?');
+      if (!boardRoute && !isBoardHash) {
         setAppState('home');
         setBoardParams(null);
         setIsBoardLoading(false);
@@ -502,15 +547,11 @@ export default function App() {
         return;
       }
 
-      const query = hash.replace('#board?', '');
-      const params = new URLSearchParams(query);
-      const meetingId = params.get('id');
-
-      if (!meetingId) {
+      if (!boardRoute) {
         setAppState('board');
         setBoardParams(null);
         setIsBoardLoading(false);
-        setBoardLoadError('유효한 Supabase 모임 링크가 아닙니다. 새 모임을 만들거나 올바른 링크를 확인해주세요.');
+        setBoardLoadError('유효한 모임 링크가 아닙니다. 새 모임을 만들거나 올바른 링크를 확인해주세요.');
         resetBoardSession();
         return;
       }
@@ -531,15 +572,17 @@ export default function App() {
       resetBoardSession();
 
       try {
-        const remoteBoard = await loadMeeting(meetingId);
-        if (!isActive || window.location.hash !== hash) return;
+        const remoteBoard = boardRoute.type === 'shareCode'
+          ? await loadMeetingByShareCode(boardRoute.value)
+          : await loadMeeting(boardRoute.value);
+        if (!isActive || window.location.pathname !== pathname || window.location.hash !== hash) return;
 
         setBoardParams(remoteBoard.boardParams);
         setParticipants(remoteBoard.participants);
         setAvailabilitySafely(remoteBoard.availability);
         setIsBoardLoading(false);
       } catch (error) {
-        if (!isActive || window.location.hash !== hash) return;
+        if (!isActive || window.location.pathname !== pathname || window.location.hash !== hash) return;
         setIsBoardLoading(false);
         setBoardLoadError(getUserFacingErrorMessage(error, '모임 정보를 불러오지 못했습니다.'));
       }
@@ -741,7 +784,7 @@ export default function App() {
 
     setIsCreatingMeeting(true);
     try {
-      const meetingId = await createRemoteMeeting({
+      const createdMeeting = await createRemoteMeeting({
         title: safeMeetingTitle,
         type: meetingType,
         dates: selectedDates,
@@ -754,7 +797,11 @@ export default function App() {
       setMeetingCount(currentCount => (
         typeof currentCount === 'number' ? currentCount + 1 : currentCount
       ));
-      window.location.hash = `board?id=${encodeURIComponent(meetingId)}`;
+      if (createdMeeting.shareCode) {
+        window.location.href = getBoardShareUrl(createdMeeting);
+      } else {
+        window.location.hash = `board?id=${encodeURIComponent(createdMeeting.id)}`;
+      }
     } catch (error) {
       showAlert(getUserFacingErrorMessage(error, '모임을 만들지 못했습니다.'));
     } finally {
@@ -1415,7 +1462,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
 
     const title = boardParams?.title || 'Moitime 모임';
     const text = `“${title}” 투표 완료했어요!\n시간 확인해 주세요 🙂`;
-    const url = window.location.href;
+    const url = getBoardShareUrl(boardParams);
 
     if (navigator.share) {
       try {
@@ -1620,7 +1667,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
           <button
             type="button"
             className="flex items-center gap-2 text-sm font-semibold text-[#1d1d1f] hover:text-[#2b9668] transition-colors"
-            onClick={() => {window.location.hash = '';}}
+            onClick={() => {window.location.href = getAppBaseUrl();}}
           >
             <span className="w-9 h-9 rounded-full bg-[#19734d] text-white flex items-center justify-center">
               <Calendar size={17} />
@@ -1658,7 +1705,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
           {appState === 'board' && (
             <button
               onClick={() => copyToClipboard(
-                window.location.href,
+                getBoardShareUrl(boardParams),
                 boardParams?.type === MEETING_TYPES.REGULAR ? '모임 링크가 복사되었습니다.' : '초대 링크가 복사되었습니다.'
               )}
               className="shrink-0 text-xs sm:text-sm bg-[#19734d] hover:bg-[#2b9668] text-white px-3 sm:px-4 py-2 rounded-full flex items-center gap-1.5 font-semibold transition-colors"

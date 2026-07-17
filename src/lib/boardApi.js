@@ -1,6 +1,14 @@
 import { requireSupabase, supabase } from './supabase';
 
 const firstRow = value => (Array.isArray(value) ? value[0] : value);
+const MEETING_FIELDS = 'id,title,meeting_type,dates,start_hour,end_hour,expected_participants,notification_channel';
+const MEETING_FIELDS_WITH_SHARE_CODE = `${MEETING_FIELDS},share_code`;
+
+const isMissingShareCodeColumnError = error => {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('share_code')
+    && (error?.code === '42703' || error?.code === 'PGRST204' || message.includes('schema cache'));
+};
 
 const throwIfError = (error, fallbackMessage) => {
   if (!error) return;
@@ -37,7 +45,20 @@ export const createMeeting = async ({
     .single();
 
   throwIfError(error, '모임을 만들지 못했습니다.');
-  return data.id;
+  if (!data?.id) throw new Error('모임을 만들지 못했습니다.');
+
+  const { data: shareCodeRow, error: shareCodeError } = await client
+    .from('meetings')
+    .select('share_code')
+    .eq('id', data.id)
+    .maybeSingle();
+
+  // 마이그레이션 전에도 모임 생성은 UUID 링크로 계속할 수 있습니다.
+  if (shareCodeError && !isMissingShareCodeColumnError(shareCodeError)) {
+    return { id: data.id, shareCode: null };
+  }
+
+  return { id: data.id, shareCode: shareCodeRow?.share_code || null };
 };
 
 export const getMeetingCount = async () => {
@@ -50,16 +71,30 @@ export const getMeetingCount = async () => {
   return count ?? 0;
 };
 
-export const loadMeeting = async meetingId => {
+const loadMeetingBy = async (lookupColumn, lookupValue) => {
   const client = requireSupabase();
-  const { data: meeting, error: meetingError } = await client
+  let { data: meeting, error: meetingError } = await client
     .from('meetings')
-    .select('id,title,meeting_type,dates,start_hour,end_hour,expected_participants,notification_channel')
-    .eq('id', meetingId)
+    .select(MEETING_FIELDS_WITH_SHARE_CODE)
+    .eq(lookupColumn, lookupValue)
     .maybeSingle();
+
+  if (meetingError && isMissingShareCodeColumnError(meetingError) && lookupColumn === 'id') {
+    ({ data: meeting, error: meetingError } = await client
+      .from('meetings')
+      .select(MEETING_FIELDS)
+      .eq('id', lookupValue)
+      .maybeSingle());
+  }
+
+  if (meetingError && isMissingShareCodeColumnError(meetingError)) {
+    throw new Error('짧은 링크 설정이 아직 완료되지 않았습니다. Supabase 마이그레이션을 먼저 적용해주세요.');
+  }
 
   throwIfError(meetingError, '모임 정보를 불러오지 못했습니다.');
   if (!meeting) throw new Error('존재하지 않거나 삭제된 모임 링크입니다.');
+
+  const meetingId = meeting.id;
 
   const [{ data: participantRows, error: participantsError }, { data: responseRows, error: responsesError }] = await Promise.all([
     client
@@ -101,12 +136,17 @@ export const loadMeeting = async meetingId => {
       end: meeting.end_hour,
       expectedParticipants: meeting.expected_participants,
       notificationChannel: meeting.notification_channel,
+      shareCode: meeting.share_code || null,
     },
     participants,
     participantIds,
     availability,
   };
 };
+
+export const loadMeeting = meetingId => loadMeetingBy('id', meetingId);
+
+export const loadMeetingByShareCode = shareCode => loadMeetingBy('share_code', shareCode);
 
 export const joinMeeting = async ({ meetingId, name, password }) => {
   const client = requireSupabase();
