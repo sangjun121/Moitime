@@ -1,6 +1,6 @@
 # Security Policy
 
-when7meet is currently an early beta service. Please avoid entering real passwords or sensitive personal information while using it.
+Timelink is currently an early beta service. Please avoid entering real passwords or sensitive personal information while using it.
 
 ## Supported Versions
 
@@ -52,4 +52,3 @@ The following are not currently treated as security vulnerabilities:
 ## Response
 
 I will review valid reports as soon as possible and prioritize fixes based on impact and reproducibility.
-

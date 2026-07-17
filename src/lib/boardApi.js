@@ -40,6 +40,16 @@ export const createMeeting = async ({
   return data.id;
 };
 
+export const getMeetingCount = async () => {
+  const client = requireSupabase();
+  const { count, error } = await client
+    .from('meetings')
+    .select('*', { count: 'exact', head: true });
+
+  throwIfError(error, '생성된 모임 수를 불러오지 못했습니다.');
+  return count ?? 0;
+};
+
 export const loadMeeting = async meetingId => {
   const client = requireSupabase();
   const { data: meeting, error: meetingError } = await client
