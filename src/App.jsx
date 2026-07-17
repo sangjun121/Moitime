@@ -399,7 +399,6 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState(null);
   
   // 구글 캘린더 연동 상태
-  const [isGoogleCalendarModalOpen, setIsGoogleCalendarModalOpen] = useState(false);
   const [isCalendarPickerOpen, setIsCalendarPickerOpen] = useState(false);
   const [googleCalendars, setGoogleCalendars] = useState([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState([]);
@@ -522,7 +521,6 @@ export default function App() {
       setShareMessage('');
       setWaveSlots({});
       googleAccessTokenRef.current = null;
-      setIsGoogleCalendarModalOpen(false);
       setIsCalendarPickerOpen(false);
       setGoogleCalendars([]);
       setSelectedCalendarIds([]);
@@ -1293,8 +1291,7 @@ export default function App() {
       return;
     }
     if (isCalendarAutoFilling) return;
-    setIsGoogleCalendarModalOpen(true);
-    loadGoogleIdentityScript().catch(() => {});
+    handleConfirmGoogleCalendar();
   };
 
   const closeCalendarPicker = () => {
@@ -1307,7 +1304,6 @@ export default function App() {
   const handleConfirmGoogleCalendar = async () => {
     if (!boardParams) return;
 
-    setIsGoogleCalendarModalOpen(false);
     setIsCalendarAutoFilling(true);
 
     try {
@@ -1326,7 +1322,6 @@ export default function App() {
 
       setGoogleCalendars(calendars);
       setSelectedCalendarIds(selectedCalendars.length > 0 ? selectedCalendars : [calendars[0].id]);
-      setIsGoogleCalendarModalOpen(false);
       setIsCalendarPickerOpen(true);
     } catch (error) {
       showAlert(getUserFacingErrorMessage(error, 'Google Calendar 연동에 실패했습니다.'));
@@ -1539,41 +1534,6 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
           <p className="whitespace-pre-line text-sm leading-relaxed text-[#333333]">{dialog.message}</p>
         </AppModal>
       )}
-
-      <AppModal
-        open={isGoogleCalendarModalOpen}
-        icon={Calendar}
-        title="Google Calendar"
-        onClose={() => setIsGoogleCalendarModalOpen(false)}
-        closeOnOverlay={!isCalendarAutoFilling}
-        actions={(
-          <>
-            <button
-              type="button"
-              onClick={() => setIsGoogleCalendarModalOpen(false)}
-              disabled={isCalendarAutoFilling}
-              className="rounded-full px-4 py-2 text-sm font-medium text-[#333333] transition-colors hover:bg-[#f0f0f0] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              취소
-            </button>
-            <button
-              type="button"
-              onClick={handleConfirmGoogleCalendar}
-              disabled={isCalendarAutoFilling}
-              className="rounded-full bg-[#19734d] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isCalendarAutoFilling ? '캘린더 확인 중...' : '연동하고 선택하기'}
-            </button>
-          </>
-        )}
-      >
-        <p className="text-sm leading-relaxed text-[#333333]">
-          캘린더 일정이 없는 시간을 내 가능 시간으로 자동 표시합니다.
-        </p>
-        <div className="mt-4 rounded-[18px] border border-[#e0e0e0] bg-[#f5f5f7] px-4 py-3 text-sm text-[#333333]">
-          현재 Google 앱 검수 전이라 테스터 계정만 사용할 수 있습니다. Slack DM으로 Gmail 주소를 보내주시면 테스터 계정에 추가해드릴게요.
-        </div>
-      </AppModal>
 
       <AppModal
         open={isCalendarPickerOpen}
