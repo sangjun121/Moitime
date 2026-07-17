@@ -2164,7 +2164,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                   </div>
                 </div>
 
-                <form onSubmit={handleJoinBoard} className="w-full lg:w-auto">
+                <form onSubmit={handleJoinBoard} className="w-full lg:w-[440px] lg:flex-none">
                   <div className="rounded-[18px] bg-[#f5f5f7] p-2 flex flex-col sm:flex-row gap-2 border border-[#e0e0e0]">
                     <input
                       type="text"
@@ -2205,15 +2205,15 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                     )}
                   </div>
                   {participantAuthError ? (
-                    <p className="mt-2 text-right text-xs text-red-600">{participantAuthError}</p>
+                    <p className="mt-2 min-h-8 text-right text-xs leading-4 text-red-600" aria-live="polite">{participantAuthError}</p>
                   ) : (
-                    <p className="mt-2 text-right text-xs text-[#7a7a7a]">
+                    <p className="mt-2 min-h-8 text-right text-xs leading-4 text-[#7a7a7a]" aria-live="polite">
                       {isSavingAvailability
                         ? '응답 저장 중...'
                         : (
                           <>
                             임시 비밀번호로 나중에 응답을 수정할 수 있어요.{' '}
-                            <span className="font-medium text-[#8a6418]">실제로 사용하는 비밀번호는 입력하지 마세요.</span>
+                            <span className="whitespace-normal font-medium text-[#8a6418] sm:whitespace-nowrap">실제로 사용하는 비밀번호는 입력하지 마세요.</span>
                           </>
                         )}
                     </p>
