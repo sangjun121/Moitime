@@ -13,6 +13,9 @@ build/
 # Local Supabase setup notes
 SUPABASE_SETUP.md
 
+# Personal troubleshooting notes
+docs/short-share-links.md
+
 # Logs
 npm-debug.log*
 yarn-debug.log*
