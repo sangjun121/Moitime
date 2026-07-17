@@ -11,9 +11,9 @@
 <p align="center">
   <a href="https://moitime.co.kr/"><strong>서비스 바로가기</strong></a>
   ·
-  <a href="https://github.com/sangjun121/when-7-meet/issues">버그 제보</a>
+  <a href="https://github.com/sangjun121/moitime/issues">버그 제보</a>
   ·
-  <a href="https://github.com/sangjun121/when-7-meet/issues">기능 제안</a>
+  <a href="https://github.com/sangjun121/moitime/issues">기능 제안</a>
   ·
   <a href="SECURITY.md">Security</a>
 </p>
@@ -21,7 +21,7 @@
 <p align="center">
   <img alt="GitHub Pages" src="https://img.shields.io/badge/GitHub%20Pages-live-19734d?style=flat-square" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-1d1d1f?style=flat-square" />
-  <img alt="GitHub stars" src="https://img.shields.io/github/stars/sangjun121/when-7-meet?style=flat-square&color=19734d" />
+  <img alt="GitHub stars" src="https://img.shields.io/github/stars/sangjun121/moitime?style=flat-square&color=19734d" />
 </p>
 
 ![Moitime 홈 화면](docs/images/home.png)

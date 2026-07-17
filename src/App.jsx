@@ -1679,14 +1679,14 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
             <span className="text-xl font-bold">Moitime</span>
           </button>
           <a
-            href="https://github.com/sangjun121/when-7-meet"
+            href="https://github.com/sangjun121/moitime"
             target="_blank"
             rel="noreferrer"
             aria-label="Moitime GitHub 저장소 열기"
             className="inline-flex rounded-sm transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2b9668]"
           >
             <img
-              src="https://img.shields.io/github/stars/sangjun121/when-7-meet?style=social"
+              src="https://img.shields.io/github/stars/sangjun121/moitime?style=social"
               alt="Star on GitHub"
               className="h-5"
             />
