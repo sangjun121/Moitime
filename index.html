@@ -16,6 +16,20 @@
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Moitime 일정 조율 화면" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      (() => {
+        const legacyPath = '/when-7-meet';
+        const isLegacyGithubPagesUrl = window.location.hostname === 'sangjun121.github.io'
+          && (window.location.pathname === legacyPath || window.location.pathname.startsWith(`${legacyPath}/`));
+
+        if (!isLegacyGithubPagesUrl) return;
+
+        const destination = new URL('https://moitime.co.kr/');
+        destination.search = window.location.search;
+        destination.hash = window.location.hash;
+        window.location.replace(destination.href);
+      })();
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>

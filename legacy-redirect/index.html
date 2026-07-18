@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <meta property="og:title" content="Moitime으로 이동 중">
+    <meta property="og:description" content="일정 조율 서비스 Moitime으로 이동합니다.">
+    <meta property="og:image" content="https://moitime.co.kr/og-image.png">
+    <title>Moitime으로 이동 중</title>
+  </head>
+  <body>
+    <p>
+      새 주소로 이동 중입니다.
+      <a id="fallback-link" href="https://moitime.co.kr/">Moitime 열기</a>
+    </p>
+
+    <script>
+      const target = new URL('https://moitime.co.kr/');
+      const legacyPrefix = '/when-7-meet/';
+      const pathCode = location.pathname.startsWith(legacyPrefix)
+        ? location.pathname.slice(legacyPrefix.length).replace(/^\/+/, '')
+        : '';
+      const isShareCode = /^(?:[A-Za-z0-9_-]{8}|[a-f0-9]{10})$/.test(pathCode);
+
+      target.search = isShareCode
+        ? `?code=${encodeURIComponent(pathCode)}`
+        : location.search;
+      target.hash = location.hash;
+
+      document.querySelector('#fallback-link').href = target.href;
+      window.location.replace(target.href);
+    </script>
+  </body>
+</html>

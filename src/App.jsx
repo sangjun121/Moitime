@@ -587,6 +587,13 @@ export default function App() {
           : await loadMeeting(boardRoute.value);
         if (!isActive || window.location.pathname !== pathname || window.location.hash !== hash) return;
 
+        if (boardRoute.type === 'id' && remoteBoard.boardParams.shareCode) {
+          const canonicalUrl = getBoardShareUrl(remoteBoard.boardParams);
+          if (window.location.href !== canonicalUrl) {
+            window.history.replaceState(window.history.state, '', canonicalUrl);
+          }
+        }
+
         setBoardParams(remoteBoard.boardParams);
         setParticipants(remoteBoard.participants);
         setAvailabilitySafely(remoteBoard.availability);
