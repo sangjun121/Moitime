@@ -67,13 +67,13 @@ const GithubStarBadge = () => {
   return (
     <span
       title="GitHub 저장소 스타 수"
-      className="inline-flex h-6 overflow-hidden rounded-[4px] border border-[#d0d7de] text-[11px] font-semibold leading-none shadow-[0_1px_2px_rgba(27,31,36,0.12)] transition-opacity hover:opacity-85"
+      className="group inline-flex h-6 overflow-hidden rounded-[4px] border border-[#d0d7de] bg-white text-xs font-semibold leading-none text-[#24292f] transition-colors hover:border-[#b8c0c8]"
     >
-      <span className="inline-flex items-center gap-1 bg-[#24292f] px-2 text-white">
-        <Github size={12} strokeWidth={2} aria-hidden="true" />
+      <span className="inline-flex items-center gap-0.5 bg-[#f6f8fa] px-1.5 group-hover:bg-[#eef1f3]">
+        <Github className="h-2.5 w-2.5 shrink-0" size={10} strokeWidth={2.1} aria-hidden="true" />
         <span>Star</span>
       </span>
-      <span className="inline-flex min-w-[28px] items-center justify-center bg-[#f6f8fa] px-2 text-[#24292f] tabular-nums">
+      <span className="inline-flex min-w-[34px] items-center justify-center border-l border-[#d0d7de] bg-white px-1 text-[#24292f] tabular-nums group-hover:bg-[#f6f8fa]">
         {starCount === null ? '-' : starCount.toLocaleString('ko-KR')}
       </span>
     </span>
@@ -2200,13 +2200,12 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                       </button>
                     )}
                   </div>
-                  {participantAuthError ? (
+                  {participantAuthError && (
                     <p className="mt-2 min-h-8 text-right text-xs leading-4 text-red-600" aria-live="polite">{participantAuthError}</p>
-                  ) : (
+                  )}
+                  {!participantAuthError && (
                     <p className="mt-2 min-h-8 text-right text-xs leading-4 text-[#7a7a7a]" aria-live="polite">
-                      {isSavingAvailability
-                        ? '응답 저장 중...'
-                        : <span className="whitespace-normal font-medium text-[#8a6418] sm:whitespace-nowrap">실제로 사용하는 비밀번호는 입력하지 마세요.</span>}
+                      <span className="whitespace-normal font-medium text-[#8a6418] sm:whitespace-nowrap">실제로 사용하는 비밀번호는 입력하지 마세요.</span>
                     </p>
                   )}
                 </form>
@@ -2269,7 +2268,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                           onClick={handleExcludeLunchTime}
                           disabled={!hasActiveParticipantSession || isCalendarAutoFilling || isSavingAvailability || !hasLunchTimeSlots}
                           title={hasLunchTimeSlots ? '11시 30분부터 13시까지의 점심시간을 제외합니다.' : '현재 시간대에 점심시간 슬롯이 없습니다.'}
-                          className="flex items-center justify-center gap-1.5 rounded-full bg-[#eaf1eb] px-3 py-2 text-xs font-semibold text-[#19734d] transition-colors hover:bg-[#d6eadc] disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex items-center justify-center gap-1.5 rounded-full bg-[#eaf1eb] px-3 py-2 text-xs font-semibold text-[#19734d] transition-colors hover:bg-[#d6eadc] disabled:cursor-not-allowed disabled:hover:bg-[#eaf1eb]"
                         >
                           <Clock size={14} />
                           점심시간 제외하기
@@ -2279,7 +2278,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                         type="button"
                         onClick={handleResetCurrentUserAvailability}
                         disabled={!hasActiveParticipantSession || isCalendarAutoFilling || isSavingAvailability}
-                        className="flex items-center justify-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-2 text-xs font-semibold text-[#333333] transition-colors hover:bg-[#e9e9eb] disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex items-center justify-center gap-1.5 rounded-full bg-[#f5f5f7] px-3 py-2 text-xs font-semibold text-[#333333] transition-colors hover:bg-[#e9e9eb] disabled:cursor-not-allowed disabled:hover:bg-[#f5f5f7]"
                       >
                         <RotateCcw size={14} />
                         초기화
@@ -2419,9 +2418,11 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                 </div>
 
                 {isJoined && (
-                  <div className="mb-6 flex flex-col gap-4 border-l-[3px] border-[#2b9668] bg-[#f2f7f3] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                  <div className="mb-6 flex flex-col gap-4 border-y border-[#e0e5e1] py-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-start gap-3">
-                      <CheckCircle2 size={20} className="mt-0.5 shrink-0 text-[#19734d]" />
+                      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#edf7f0] text-[#19734d]">
+                        <CheckCircle2 size={16} />
+                      </span>
                       <div>
                         <p className="text-sm font-semibold text-[#1d1d1f]">가능한 시간 다 골랐나요?</p>
                         <p className="mt-1 text-xs leading-relaxed text-[#666666]">
@@ -2433,10 +2434,10 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                       type="button"
                       onClick={handleShareVoteCompletion}
                       disabled={!isVoteCompletionReady}
-                      className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-full bg-[#19734d] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2b9668] focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-55 sm:w-auto"
+                      className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-[8px] bg-[#19734d] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#2b9668] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2b9668] focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-55 sm:w-auto"
                     >
                       <MessageSquare size={15} />
-                      {isVoteCompletionReady ? '완료 소식 보내기' : '응답 저장 중...'}
+                      완료 소식 보내기
                     </button>
                   </div>
                 )}
