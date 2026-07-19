@@ -2206,12 +2206,7 @@ ${boardParams?.title || '정기 모임'}은 이 시간으로 어때요?
                     <p className="mt-2 min-h-8 text-right text-xs leading-4 text-[#7a7a7a]" aria-live="polite">
                       {isSavingAvailability
                         ? '응답 저장 중...'
-                        : (
-                          <>
-                            임시 비밀번호로 나중에 응답을 수정할 수 있어요.{' '}
-                            <span className="whitespace-normal font-medium text-[#8a6418] sm:whitespace-nowrap">실제로 사용하는 비밀번호는 입력하지 마세요.</span>
-                          </>
-                        )}
+                        : <span className="whitespace-normal font-medium text-[#8a6418] sm:whitespace-nowrap">실제로 사용하는 비밀번호는 입력하지 마세요.</span>}
                     </p>
                   )}
                 </form>
