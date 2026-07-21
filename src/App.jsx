@@ -744,7 +744,7 @@ export default function App() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: boardParams?.title || '모아타임',
+          title: boardParams?.title || 'Moitime',
           text: shareMessage,
         });
         showToast('공유 창을 열었습니다.');
@@ -1521,7 +1521,7 @@ export default function App() {
   const handleShareVoteCompletion = async () => {
     if (!isVoteCompletionReady) return;
 
-    const title = boardParams?.title || '모아타임 모임';
+    const title = boardParams?.title || 'Moitime 모임';
     const text = `“${title}” 투표 완료했어요!\n시간 확인해 주세요 🙂`;
     const url = getBoardShareUrl(boardParams);
 
@@ -1698,7 +1698,7 @@ export default function App() {
             <span className="w-9 h-9 rounded-full bg-[#19734d] text-white flex items-center justify-center">
               <Calendar size={17} />
             </span>
-            <span className="text-xl font-bold">모아타임</span>
+            <span className="text-xl font-bold">Moitime</span>
           </button>
           <a
             href="https://github.com/sangjun121/moitime"
@@ -1716,7 +1716,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto h-14 px-4 flex items-center justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-[#1d1d1f] truncate">
-              {appState === 'board' && boardParams ? boardParams.title : '모아타임'}
+              {appState === 'board' && boardParams ? boardParams.title : 'Moitime'}
             </p>
             <p className="text-xs text-[#7a7a7a]">
               {appState === 'board' && boardParams
@@ -1763,7 +1763,7 @@ export default function App() {
           <div className="animate-in fade-in">
             <section className="home-hero relative px-4 pt-12 pb-12 sm:pt-20 sm:pb-16 text-center overflow-hidden">
               <div className="hero-copy">
-              <p className="hero-kicker text-sm font-semibold text-[#19734d] mb-4 animate-fade-up">모아타임</p>
+              <p className="hero-kicker text-sm font-semibold text-[#19734d] mb-4 animate-fade-up">Moitime</p>
               <h2 className="mx-auto max-w-4xl text-[clamp(48px,8vw,104px)] font-semibold leading-[0.95] text-[#1d1d1f]">
                 <>
                   <span className="inline-block animate-word-pop delay-100">시간</span>{' '}
@@ -1779,7 +1779,7 @@ export default function App() {
               </p>
               {typeof meetingCount === 'number' && (
                 <p className="mt-3 text-sm text-[#7a7a7a]" aria-live="polite">
-                  모아타임에서 지금까지 <strong className="font-semibold tabular-nums text-[#19734d]">{meetingCount.toLocaleString()}개의 모임</strong>이 만들어졌어요!
+                  Moitime에서 지금까지 <strong className="font-semibold tabular-nums text-[#19734d]">{meetingCount.toLocaleString()}개의 모임</strong>이 만들어졌어요!
                 </p>
               )}
               </div>
@@ -1797,7 +1797,7 @@ export default function App() {
                 </div>
                 <div className="preview-footer">
                   <span className="inline-flex items-center gap-2"><span className="preview-marker" /> 모두가 가능한 시간</span>
-                  <span>모아타임</span>
+                  <span>Moitime</span>
                 </div>
               </div>
             </section>
